@@ -232,7 +232,6 @@ impl AppState {
         )
         .map_err(|e| e.to_string())?;
 
-        // Données initiales de démonstration si la table est vide
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM invoices", [], |r| r.get(0))
             .unwrap_or(0);
@@ -268,7 +267,11 @@ impl AppState {
                 match fs::read_to_string(&path) {
                     Ok(raw) => match toml::from_str::<AimToolFile>(&raw) {
                         Ok(parsed) => {
-                            tracing::info!("Outil .aim chargé : {} (v{})", parsed.tool.name, parsed.tool.version);
+                            tracing::info!(
+                                "Outil .aim chargé : {} (v{})",
+                                parsed.tool.name,
+                                parsed.tool.version
+                            );
                             loaded.insert(parsed.tool.name.clone(), parsed);
                         }
                         Err(err) => {
@@ -290,7 +293,7 @@ impl AppState {
 }
 
 // ============================================================================
-// 5. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLx/SQLite + RHAI)
+// 5. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLite + RHAI)
 // ============================================================================
 
 pub fn validate_and_prepare_inputs(
@@ -449,7 +452,8 @@ pub fn validate_output_contract(
                     field: None,
                     expected_type: Some("array".into()),
                     received_value: output.clone(),
-                    ai_fix_hint: "The tool output must be a JSON array matching [output.items].".into(),
+                    ai_fix_hint: "The tool output must be a JSON array matching [output.items]."
+                        .into(),
                 });
             }
             return Ok(());
@@ -461,7 +465,8 @@ pub fn validate_output_contract(
             field: None,
             expected_type: Some("object".into()),
             received_value: output.clone(),
-            ai_fix_hint: "The handler must return a map/object matching the [output] contract.".into(),
+            ai_fix_hint: "The handler must return a map/object matching the [output] contract."
+                .into(),
         })?;
 
         for (field, expected) in out_obj {
@@ -544,7 +549,11 @@ fn execute_sql_rows(
     let clean_query = query.replace("::text", "");
     let (sql, bind_vals) = bind_named_sql(&clean_query, params);
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
     let rows = stmt
         .query_map(params_from_iter(bind_vals.iter()), |row| {
@@ -594,14 +603,18 @@ pub fn execute_tool_handler(
                 received_value: Value::Null,
                 ai_fix_hint: format!("Database lock error: {}", e),
             })?;
-            let rows = execute_sql_rows(&conn, query, clean_inputs).map_err(|e| SelfHealingError {
-                tool: tool.tool.name.clone(),
-                phase: "native_sql_execution".into(),
-                field: None,
-                expected_type: None,
-                received_value: json!(query),
-                ai_fix_hint: format!("SQL execution error: {}. Verify column names and syntax.", e),
-            })?;
+            let rows =
+                execute_sql_rows(&conn, query, clean_inputs).map_err(|e| SelfHealingError {
+                    tool: tool.tool.name.clone(),
+                    phase: "native_sql_execution".into(),
+                    field: None,
+                    expected_type: None,
+                    received_value: json!(query),
+                    ai_fix_hint: format!(
+                        "SQL execution error: {}. Verify column names and syntax.",
+                        e
+                    ),
+                })?;
             let out = Value::Array(rows);
             validate_output_contract(tool, &out)?;
             Ok((out, 1))
@@ -627,13 +640,18 @@ pub fn execute_tool_handler(
 
             engine
                 .register_type_with_name::<SandboxEnv>("SandboxEnv")
-                .register_fn("timestamp_sec", |_env: &mut SandboxEnv| -> i64 {
-                    Utc::now().timestamp()
+                .register_fn("timestamp_sec", |_env: &mut SandboxEnv| -> String {
+                    Utc::now().timestamp().to_string()
                 })
                 .register_fn(
                     "db_query_one",
-                    |env: &mut SandboxEnv, _conn_alias: &str, sql: &str, params: RhaiMap| -> Dynamic {
-                        let json_params: Value = serde_json::to_value(params).unwrap_or(json!({}));
+                    |env: &mut SandboxEnv,
+                     _conn_alias: &str,
+                     sql: &str,
+                     params: RhaiMap|
+                     -> Dynamic {
+                        let json_params: Value =
+                            rhai::serde::from_dynamic(&Dynamic::from(params)).unwrap_or(json!({}));
                         let mut map_params = HashMap::new();
                         if let Some(obj) = json_params.as_object() {
                             for (k, v) in obj {
@@ -643,7 +661,8 @@ pub fn execute_tool_handler(
                         if let Ok(conn) = env.db.lock() {
                             if let Ok(mut rows) = execute_sql_rows(&conn, sql, &map_params) {
                                 if let Some(first) = rows.pop() {
-                                    return rhai::serde::to_dynamic(first).unwrap_or(Dynamic::UNIT);
+                                    return rhai::serde::to_dynamic(&first)
+                                        .unwrap_or(Dynamic::UNIT);
                                 }
                             }
                         }
@@ -653,7 +672,8 @@ pub fn execute_tool_handler(
                 .register_fn(
                     "db_execute",
                     |env: &mut SandboxEnv, _conn_alias: &str, sql: &str, params: RhaiMap| -> i64 {
-                        let json_params: Value = serde_json::to_value(params).unwrap_or(json!({}));
+                        let json_params: Value =
+                            rhai::serde::from_dynamic(&Dynamic::from(params)).unwrap_or(json!({}));
                         let mut map_params = HashMap::new();
                         if let Some(obj) = json_params.as_object() {
                             for (k, v) in obj {
@@ -673,34 +693,41 @@ pub fn execute_tool_handler(
                 );
 
             let mut scope = Scope::new();
-            scope.push("env", SandboxEnv { db: Arc::clone(&state.db) });
+            scope.push(
+                "env",
+                SandboxEnv {
+                    db: Arc::clone(&state.db),
+                },
+            );
 
-            let input_dyn =
-                rhai::serde::to_dynamic(clean_inputs).unwrap_or_else(|_| Dynamic::from(RhaiMap::new()));
+            let input_dyn = rhai::serde::to_dynamic(clean_inputs)
+                .unwrap_or_else(|_| Dynamic::from(RhaiMap::new()));
             scope.push("input", input_dyn);
 
-            let result_dyn: Dynamic = engine.eval_with_scope(&mut scope, script).map_err(|err| {
-                SelfHealingError {
+            let result_dyn: Dynamic =
+                engine
+                    .eval_with_scope(&mut scope, script)
+                    .map_err(|err| SelfHealingError {
+                        tool: tool.tool.name.clone(),
+                        phase: "rhai_sandbox_execution".into(),
+                        field: None,
+                        expected_type: None,
+                        received_value: Value::Null,
+                        ai_fix_hint: format!(
+                            "Rhai sandbox execution aborted: {}. Check script logic or input constraints.",
+                            err
+                        ),
+                    })?;
+
+            let json_out: Value =
+                rhai::serde::from_dynamic(&result_dyn).map_err(|e| SelfHealingError {
                     tool: tool.tool.name.clone(),
-                    phase: "rhai_sandbox_execution".into(),
+                    phase: "output_serialization".into(),
                     field: None,
                     expected_type: None,
                     received_value: Value::Null,
-                    ai_fix_hint: format!(
-                        "Rhai sandbox execution aborted: {}. Check script logic or input constraints.",
-                        err
-                    ),
-                }
-            })?;
-
-            let json_out: Value = rhai::serde::from_dynamic(&result_dyn).map_err(|e| SelfHealingError {
-                tool: tool.tool.name.clone(),
-                phase: "output_serialization".into(),
-                field: None,
-                expected_type: None,
-                received_value: Value::Null,
-                ai_fix_hint: format!("Unable to serialize Rhai return value to JSON: {}", e),
-            })?;
+                    ai_fix_hint: format!("Unable to serialize Rhai return value to JSON: {}", e),
+                })?;
 
             validate_output_contract(tool, &json_out)?;
             let used_ops = ops_counter.lock().map(|c| *c).unwrap_or(0);
@@ -712,7 +739,10 @@ pub fn execute_tool_handler(
             field: Some("engine".into()),
             expected_type: Some("native_sql | rhai".into()),
             received_value: json!(other),
-            ai_fix_hint: format!("Unsupported engine '{}'. Use 'native_sql' or 'rhai'.", other),
+            ai_fix_hint: format!(
+                "Unsupported engine '{}'. Use 'native_sql' or 'rhai'.",
+                other
+            ),
         }),
     }
 }
@@ -735,18 +765,10 @@ pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
 
 async fn llms_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tools = state.tools.read().unwrap();
-    let mut doc = String::from("# mod_aim - Catalogue des Outils Actifs (MCP & REST)
-
-");
+    let mut doc = String::from("# mod_aim - Catalogue des Outils Actifs (MCP & REST)\n\n");
     for t in tools.values() {
         doc.push_str(&format!(
-            "## {} (v{})
-- Description : {}
-- Engine : `{}`
-- Scope : `{}` | Approbation Humaine (HITL) : `{}`
-- Endpoint REST : `POST /api/v1/{}`
-
-",
+            "## {} (v{})\n- Description : {}\n- Engine : `{}`\n- Scope : `{}` | Approbation Humaine (HITL) : `{}`\n- Endpoint REST : `POST /api/v1/{}`\n\n",
             t.tool.name,
             t.tool.version,
             t.tool.description,
@@ -822,7 +844,6 @@ async fn mcp_handler(
                 })
                 .collect();
 
-            // Meta-tool système natif pour vérifier un ticket HITL
             list.push(json!({
                 "name": "_system_check_approval",
                 "description": "Vérifie le statut d'un ticket de validation humaine (HITL).",
@@ -930,7 +951,6 @@ async fn mcp_handler(
                     .unwrap()
                     .insert(ticket_id.clone(), tx);
 
-                // Long-polling borné (par défaut 25s, ou surcharge via _wait_sec pour tests rapides)
                 let wait_sec = args
                     .get("_wait_sec")
                     .and_then(|v| v.as_u64())
@@ -951,7 +971,6 @@ async fn mcp_handler(
                         }));
                     }
                     _ => {
-                        // Expiration du Long-Polling : passage en mode Webhook ou Polling
                         state.pending_waiters.lock().unwrap().remove(&ticket_id);
                         let delivery_mode = if callback.is_some() {
                             "webhook"
@@ -1119,11 +1138,9 @@ async fn resolve_ticket_handler(
         .unwrap()
         .insert(ticket_id.clone(), ticket.clone());
 
-    // Si le Long-Polling est toujours actif, réveiller immédiatement la requête en attente
     if let Some(waiter) = state.pending_waiters.lock().unwrap().remove(&ticket_id) {
         let _ = waiter.send(ticket.clone());
     } else if let Some(cb) = ticket.callback.clone() {
-        // Sinon, envoyer le Webhook signé HMAC-SHA256 en tâche de fond
         let tkt_clone = ticket.clone();
         tokio::spawn(async move {
             let webhook_body = json!({
@@ -1233,7 +1250,6 @@ async fn main() {
     let state = AppState::new(PathBuf::from(&tools_dir), &db_path)
         .expect("Impossible d'initialiser l'état de mod_aim");
 
-    // Surveillance Hot-Reload inotify sur le dossier tools/
     let watcher_state = Arc::clone(&state);
     let watch_path = PathBuf::from(&tools_dir);
     std::thread::spawn(move || {
@@ -1339,7 +1355,6 @@ mod tests {
             .unwrap()
             .clone();
 
-        // Raison trop courte (< 10 caractères)
         let bad_args = json!({
             "invoice_id": 1042,
             "credit_amount": 100.0,
@@ -1353,7 +1368,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_webhook_signature() {
-        let sig = compute_hmac_sha256("whsec_test_secret", b"{"event":"aim.approval.resolved"}");
+        let sig = compute_hmac_sha256("whsec_test_secret", b"{\"event\":\"aim.approval.resolved\"}");
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), 7 + 64);
     }
