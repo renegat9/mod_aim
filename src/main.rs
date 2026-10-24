@@ -1,3 +1,7 @@
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,10 +13,10 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use rhai::{Dynamic, Engine, Map as RhaiMap, Scope};
-use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
@@ -26,8 +30,52 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const ADMIN_UI_HTML: &str = include_str!("admin_ui.html");
+
 // ============================================================================
-// 1. MODÈLE DE DONNÉES ET PARSEUR .AIM (TOML)
+// 1. CHIFFREMENT DU COFFRE-FORT (BLIND CREDENTIALS AES-256-GCM)
+// ============================================================================
+
+pub fn derive_master_key(passphrase: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(passphrase.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest);
+    key
+}
+
+pub fn encrypt_secret_aes256(master_key: &[u8; 32], plaintext: &str) -> Result<String, String> {
+    let cipher = Aes256Gcm::new_from_slice(master_key).map_err(|e| e.to_string())?;
+    let uuid_bytes = *Uuid::new_v4().as_bytes();
+    let nonce_bytes: [u8; 12] = uuid_bytes[..12].try_into().unwrap();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{}:{}", hex::encode(nonce_bytes), hex::encode(ciphertext)))
+}
+
+pub fn decrypt_secret_aes256(master_key: &[u8; 32], stored: &str) -> Result<String, String> {
+    let parts: Vec<&str> = stored.split(':').collect();
+    if parts.len() != 2 {
+        return Err("Format de secret chiffré invalide".into());
+    }
+    let nonce_vec = hex::decode(parts[0]).map_err(|e| e.to_string())?;
+    if nonce_vec.len() != 12 {
+        return Err("Taille de nonce AES-GCM invalide".into());
+    }
+    let ciphertext = hex::decode(parts[1]).map_err(|e| e.to_string())?;
+    let cipher = Aes256Gcm::new_from_slice(master_key).map_err(|e| e.to_string())?;
+    let nonce = Nonce::from_slice(&nonce_vec);
+    let plain = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| "Échec du déchiffrement AES-256-GCM (clé maître invalide ou données altérées)".to_string())?;
+    String::from_utf8(plain).map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// 2. MODÈLE DE DONNÉES ET PARSEUR .AIM (TOML)
 // ============================================================================
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,7 +163,7 @@ pub struct HandlerConfig {
 }
 
 // ============================================================================
-// 2. PROTOCOLE D'AUTO-GUÉRISON (SELF-HEALING ERROR PAYLOAD)
+// 3. PROTOCOLE D'AUTO-GUÉRISON (SELF-HEALING ERROR PAYLOAD)
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +191,7 @@ impl SelfHealingError {
 }
 
 // ============================================================================
-// 3. GESTION DES TICKETS HITL (HUMAN-IN-THE-LOOP) & CALLBACKS
+// 4. GESTION DES TICKETS HITL (HUMAN-IN-THE-LOOP) & CALLBACKS
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,13 +229,14 @@ pub struct HumanResolutionRequest {
 }
 
 // ============================================================================
-// 4. ÉTAT PARTAGÉ DU MOTEUR (APP STATE)
+// 5. ÉTAT PARTAGÉ DU MOTEUR & PERSISTANCE SQLITE (PHASE 3)
 // ============================================================================
 
 pub struct AppState {
     pub tools_dir: PathBuf,
     pub tools: RwLock<HashMap<String, AimToolFile>>,
     pub db: Arc<Mutex<Connection>>,
+    pub master_key: [u8; 32],
     pub tickets: RwLock<HashMap<String, ApprovalTicket>>,
     pub pending_waiters: Mutex<HashMap<String, oneshot::Sender<ApprovalTicket>>>,
 }
@@ -195,13 +244,20 @@ pub struct AppState {
 impl AppState {
     pub fn new(tools_dir: PathBuf, db_path: &str) -> Result<Arc<Self>, String> {
         let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-        Self::init_database(&conn)?;
+        let master_secret = std::env::var("AIM_MASTER_KEY")
+            .unwrap_or_else(|_| "mod_aim_default_master_key_change_in_prod_2026".into());
+        let master_key = derive_master_key(&master_secret);
+
+        Self::init_database(&conn, &master_key)?;
+
+        let existing_tickets = Self::load_tickets_from_db(&conn).unwrap_or_default();
 
         let state = Arc::new(Self {
             tools_dir,
             tools: RwLock::new(HashMap::new()),
             db: Arc::new(Mutex::new(conn)),
-            tickets: RwLock::new(HashMap::new()),
+            master_key,
+            tickets: RwLock::new(existing_tickets),
             pending_waiters: Mutex::new(HashMap::new()),
         });
 
@@ -209,7 +265,7 @@ impl AppState {
         Ok(state)
     }
 
-    fn init_database(conn: &Connection) -> Result<(), String> {
+    fn init_database(conn: &Connection, master_key: &[u8; 32]) -> Result<(), String> {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -219,6 +275,33 @@ impl AppState {
                 amount_total REAL NOT NULL,
                 status TEXT NOT NULL,
                 due_date TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS connections_vault (
+                alias TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                encrypted_secret TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                key_prefix TEXT NOT NULL,
+                key_hash TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tool_states (
+                tool_name TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS approval_tickets (
+                ticket_id TEXT PRIMARY KEY,
+                tool_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                ticket_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
             );
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,6 +315,7 @@ impl AppState {
         )
         .map_err(|e| e.to_string())?;
 
+        // Factures de démonstration
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM invoices", [], |r| r.get(0))
             .unwrap_or(0);
@@ -252,7 +336,112 @@ impl AppState {
             )
             .map_err(|e| e.to_string())?;
         }
+
+        // Connexion par défaut chiffrée en AES-256-GCM dans le coffre-fort
+        let vault_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM connections_vault", [], |r| r.get(0))
+            .unwrap_or(0);
+        if vault_count == 0 {
+            if let Ok(enc) = encrypt_secret_aes256(master_key, "sqlite://embedded_wal_engine") {
+                let _ = conn.execute(
+                    "INSERT INTO connections_vault (alias, kind, encrypted_secret, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                    params!["erp_postgres", "sqlite", enc, Utc::now().to_rfc3339()],
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    fn load_tickets_from_db(conn: &Connection) -> Result<HashMap<String, ApprovalTicket>, String> {
+        let mut stmt = conn
+            .prepare("SELECT ticket_json FROM approval_tickets ORDER BY created_at DESC LIMIT 200")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let s: String = row.get(0)?;
+                Ok(s)
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut map = HashMap::new();
+        for r in rows.flatten() {
+            if let Ok(tkt) = serde_json::from_str::<ApprovalTicket>(&r) {
+                map.insert(tkt.ticket_id.clone(), tkt);
+            }
+        }
+        Ok(map)
+    }
+
+    pub fn persist_ticket(&self, ticket: &ApprovalTicket) {
+        if let Ok(conn) = self.db.lock() {
+            let json_str = serde_json::to_string(ticket).unwrap_or_default();
+            let _ = conn.execute(
+                "INSERT INTO approval_tickets (ticket_id, tool_name, status, ticket_json, created_at, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(ticket_id) DO UPDATE SET
+                   status = excluded.status,
+                   ticket_json = excluded.ticket_json,
+                   resolved_at = excluded.resolved_at",
+                params![
+                    ticket.ticket_id,
+                    ticket.tool_name,
+                    ticket.status,
+                    json_str,
+                    ticket.created_at,
+                    ticket.resolved_at
+                ],
+            );
+        }
+    }
+
+    pub fn is_tool_enabled(&self, tool_name: &str) -> bool {
+        if let Ok(conn) = self.db.lock() {
+            conn.query_row(
+                "SELECT enabled FROM tool_states WHERE tool_name = ?1",
+                params![tool_name],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(true)
+        } else {
+            true
+        }
+    }
+
+    pub fn set_tool_enabled(&self, tool_name: &str, enabled: bool) -> Result<(), String> {
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO tool_states (tool_name, enabled, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(tool_name) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+            params![tool_name, if enabled { 1 } else { 0 }, Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn store_vault_secret(&self, alias: &str, kind: &str, plaintext: &str) -> Result<(), String> {
+        let encrypted = encrypt_secret_aes256(&self.master_key, plaintext)?;
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO connections_vault (alias, kind, encrypted_secret, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(alias) DO UPDATE SET kind = excluded.kind, encrypted_secret = excluded.encrypted_secret, updated_at = excluded.updated_at",
+            params![alias, kind, encrypted, Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn resolve_vault_secret(&self, alias: &str) -> Result<String, String> {
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        let enc: String = conn
+            .query_row(
+                "SELECT encrypted_secret FROM connections_vault WHERE alias = ?1",
+                params![alias],
+                |r| r.get(0),
+            )
+            .map_err(|_| format!("Alias de connexion '{}' introuvable dans le coffre-fort", alias))?;
+        decrypt_secret_aes256(&self.master_key, &enc)
     }
 
     pub fn reload_tools(&self) -> Result<usize, String> {
@@ -293,7 +482,7 @@ impl AppState {
 }
 
 // ============================================================================
-// 5. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLite + RHAI)
+// 6. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLite + RHAI)
 // ============================================================================
 
 pub fn validate_and_prepare_inputs(
@@ -748,7 +937,7 @@ pub fn execute_tool_handler(
 }
 
 // ============================================================================
-// 6. SIGNATURE HMAC-SHA256 POUR LES WEBHOOKS DE VALIDATION HUMAINE
+// 7. SIGNATURE HMAC-SHA256 POUR LES WEBHOOKS DE VALIDATION HUMAINE
 // ============================================================================
 
 pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
@@ -760,15 +949,26 @@ pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
 }
 
 // ============================================================================
-// 7. ROUTES HTTP / MCP JSON-RPC 2.0 / REST / ADMIN UI
+// 8. ROUTES HTTP / MCP JSON-RPC 2.0 / REST / CONTROL PLANE ADMIN UI
 // ============================================================================
 
 async fn llms_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tools = state.tools.read().unwrap();
-    let mut doc = String::from("# mod_aim - Catalogue des Outils Actifs (MCP & REST)\n\n");
+    let mut doc = String::from("# mod_aim - Catalogue des Outils Actifs (MCP & REST)
+
+");
     for t in tools.values() {
+        if !state.is_tool_enabled(&t.tool.name) {
+            continue;
+        }
         doc.push_str(&format!(
-            "## {} (v{})\n- Description : {}\n- Engine : `{}`\n- Scope : `{}` | Approbation Humaine (HITL) : `{}`\n- Endpoint REST : `POST /api/v1/{}`\n\n",
+            "## {} (v{})
+- Description : {}
+- Engine : `{}`
+- Scope : `{}` | Approbation Humaine (HITL) : `{}`
+- Endpoint REST : `POST /api/v1/{}`
+
+",
             t.tool.name,
             t.tool.version,
             t.tool.description,
@@ -796,7 +996,7 @@ async fn mcp_handler(
                 "protocolVersion": "2025-03-26",
                 "serverInfo": {
                     "name": "mod_aim-rust-standalone",
-                    "version": "1.0.0"
+                    "version": "1.3.0"
                 },
                 "capabilities": {
                     "tools": { "listChanged": true }
@@ -807,7 +1007,10 @@ async fn mcp_handler(
             let tools = state.tools.read().unwrap();
             let mut list: Vec<Value> = tools
                 .values()
-                .filter(|t| t.tool.exposure.contains(&"mcp".to_string()))
+                .filter(|t| {
+                    t.tool.exposure.contains(&"mcp".to_string())
+                        && state.is_tool_enabled(&t.tool.name)
+                })
                 .map(|t| {
                     let mut props = serde_json::Map::new();
                     let mut required = Vec::new();
@@ -894,6 +1097,17 @@ async fn mcp_handler(
                 }
             }
 
+            if !state.is_tool_enabled(tool_name) {
+                return Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32001,
+                        "message": format!("L'outil '{}' est actuellement désactivé par l'administrateur.", tool_name)
+                    }
+                }));
+            }
+
             let tool_opt = state.tools.read().unwrap().get(tool_name).cloned();
             let tool = match tool_opt {
                 Some(t) => t,
@@ -940,6 +1154,7 @@ async fn mcp_handler(
                 };
 
                 let (tx, rx) = oneshot::channel();
+                state.persist_ticket(&ticket);
                 state
                     .tickets
                     .write()
@@ -982,7 +1197,7 @@ async fn mcp_handler(
                             "ticket_id": ticket_id,
                             "delivery_mode": delivery_mode,
                             "poll_tool": "_system_check_approval",
-                            "message": "En attente de validation humaine. Résultat transmis dès résolution."
+                            "message": "En attente de validation humaine dans /_admin. Résultat transmis dès résolution."
                         });
                         return Json(json!({
                             "jsonrpc": "2.0",
@@ -1006,7 +1221,7 @@ async fn mcp_handler(
                     if let Ok(conn) = state.db.lock() {
                         let _ = conn.execute(
                             "INSERT INTO audit_logs (timestamp, tool_name, status, duration_ms, details) VALUES (?1, ?2, 'success', ?3, ?4)",
-                            rusqlite::params![Utc::now().to_rfc3339(), tool.tool.name, elapsed, output.to_string()],
+                            params![Utc::now().to_rfc3339(), tool.tool.name, elapsed, output.to_string()],
                         );
                     }
                     Json(json!({
@@ -1119,7 +1334,13 @@ async fn resolve_ticket_handler(
             Ok((out, ops)) => {
                 duration_ms = start.elapsed().as_millis() as u64;
                 cpu_ops = ops;
-                ticket.execution_result = Some(out);
+                ticket.execution_result = Some(out.clone());
+                if let Ok(conn) = state.db.lock() {
+                    let _ = conn.execute(
+                        "INSERT INTO audit_logs (timestamp, tool_name, status, duration_ms, details) VALUES (?1, ?2, 'success', ?3, ?4)",
+                        params![Utc::now().to_rfc3339(), tool.tool.name, duration_ms as i64, out.to_string()],
+                    );
+                }
             }
             Err(he) => {
                 return (
@@ -1132,6 +1353,7 @@ async fn resolve_ticket_handler(
         ticket.status = "rejected".into();
     }
 
+    state.persist_ticket(&ticket);
     state
         .tickets
         .write()
@@ -1168,7 +1390,7 @@ async fn resolve_ticket_handler(
             let _ = client
                 .post(&cb.url)
                 .header("Content-Type", "application/json")
-                .header("User-Agent", "ModAIM-Rust/1.0")
+                .header("User-Agent", "ModAIM-Rust/1.3")
                 .header("X-AIM-Ticket-ID", &tkt_clone.ticket_id)
                 .header("X-AIM-Signature-256", signature)
                 .body(body_bytes)
@@ -1180,50 +1402,185 @@ async fn resolve_ticket_handler(
     (StatusCode::OK, Json(serde_json::to_value(ticket).unwrap()))
 }
 
-async fn admin_dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let tools = state.tools.read().unwrap();
-    let tickets = state.tickets.read().unwrap();
+// ============================================================================
+// 9. API D'ADMINISTRATION POUR LE CONTROL PLANE EMBARQUÉ (/_admin)
+// ============================================================================
 
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <title>mod_aim — Control Plane Zero-Trust</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #f8fafc; }}
-    h1, h2 {{ color: #38bdf8; }}
-    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
-    code {{ background: #0f172a; padding: 0.2rem 0.4rem; border-radius: 4px; color: #7dd3fc; }}
-  </style>
-</head>
-<body>
-  <h1>mod_aim — Control Plane Humain (Rust Standalone)</h1>
-  <div class="card">
-    <h2>Outils .aim actifs ({})</h2>
-    <ul>
-      {}
-    </ul>
-  </div>
-  <div class="card">
-    <h2>Tickets de validation humaine HITL ({})</h2>
-    <p>Utilisez <code>POST /_admin/tickets/:ticket_id/resolve</code> pour approuver, modifier ou rejeter un ticket.</p>
-  </div>
-</body>
-</html>"#,
-        tools.len(),
-        tools
-            .values()
-            .map(|t| format!(
-                "<li><strong>{}</strong> (v{}) — moteur: <code>{}</code> — HITL: <code>{}</code></li>",
-                t.tool.name, t.tool.version, t.handler.engine, t.security.require_human_approval
-            ))
-            .collect::<Vec<_>>()
-            .join(""),
-        tickets.len()
-    );
+async fn admin_dashboard_handler() -> impl IntoResponse {
+    Html(ADMIN_UI_HTML)
+}
 
-    Html(html)
+async fn admin_state_api_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let tools_map = state.tools.read().unwrap().clone();
+    let mut tools_list: Vec<Value> = tools_map
+        .values()
+        .map(|t| {
+            json!({
+                "name": t.tool.name,
+                "version": t.tool.version,
+                "description": t.tool.description,
+                "engine": t.handler.engine,
+                "auth_scope": t.security.auth_scope,
+                "require_human_approval": t.security.require_human_approval,
+                "max_cpu_instructions": t.security.max_cpu_instructions,
+                "enabled": state.is_tool_enabled(&t.tool.name)
+            })
+        })
+        .collect();
+    tools_list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+    let mut tickets_list: Vec<ApprovalTicket> =
+        state.tickets.read().unwrap().values().cloned().collect();
+    tickets_list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let mut vault_list = Vec::new();
+    let mut api_keys_list = Vec::new();
+    let mut audit_logs_list = Vec::new();
+
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT alias, kind, encrypted_secret, updated_at FROM connections_vault ORDER BY alias ASC",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let enc: String = r.get(2)?;
+                let preview = if enc.len() > 18 {
+                    format!("{}...", &enc[..18])
+                } else {
+                    enc
+                };
+                Ok(json!({
+                    "alias": r.get::<_, String>(0)?,
+                    "kind": r.get::<_, String>(1)?,
+                    "cipher_preview": preview,
+                    "updated_at": r.get::<_, String>(3)?
+                }))
+            }) {
+                for r in rows.flatten() {
+                    vault_list.push(r);
+                }
+            }
+        }
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT name, key_prefix, scopes, created_at FROM api_keys ORDER BY id DESC LIMIT 50",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(json!({
+                    "name": r.get::<_, String>(0)?,
+                    "key_prefix": r.get::<_, String>(1)?,
+                    "scopes": r.get::<_, String>(2)?,
+                    "created_at": r.get::<_, String>(3)?
+                }))
+            }) {
+                for r in rows.flatten() {
+                    api_keys_list.push(r);
+                }
+            }
+        }
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT timestamp, tool_name, status, duration_ms FROM audit_logs ORDER BY id DESC LIMIT 30",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(json!({
+                    "timestamp": r.get::<_, String>(0)?,
+                    "tool_name": r.get::<_, String>(1)?,
+                    "status": r.get::<_, String>(2)?,
+                    "duration_ms": r.get::<_, i64>(3)?
+                }))
+            }) {
+                for r in rows.flatten() {
+                    audit_logs_list.push(r);
+                }
+            }
+        }
+    }
+
+    Json(json!({
+        "tools": tools_list,
+        "tickets": tickets_list,
+        "vault": vault_list,
+        "api_keys": api_keys_list,
+        "audit_logs": audit_logs_list
+    }))
+}
+
+#[derive(Deserialize)]
+struct ToggleToolPayload {
+    enabled: bool,
+}
+
+async fn admin_toggle_tool_handler(
+    Path(tool_name): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ToggleToolPayload>,
+) -> impl IntoResponse {
+    match state.set_tool_enabled(&tool_name, payload.enabled) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "tool": tool_name, "enabled": payload.enabled })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct SaveConnectionPayload {
+    alias: String,
+    kind: String,
+    secret: String,
+}
+
+async fn admin_save_connection_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SaveConnectionPayload>,
+) -> impl IntoResponse {
+    match state.store_vault_secret(&payload.alias, &payload.kind, &payload.secret) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "status": "encrypted", "alias": payload.alias })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateApiKeyPayload {
+    name: String,
+    scopes: String,
+}
+
+async fn admin_create_api_key_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateApiKeyPayload>,
+) -> impl IntoResponse {
+    let raw_key = format!("aim_live_{}", Uuid::new_v4().simple());
+    let prefix = raw_key[..14].to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(raw_key.as_bytes());
+    let key_hash = hex::encode(hasher.finalize());
+
+    if let Ok(conn) = state.db.lock() {
+        let _ = conn.execute(
+            "INSERT INTO api_keys (name, key_prefix, key_hash, scopes, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![payload.name, prefix, key_hash, payload.scopes, Utc::now().to_rfc3339()],
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "name": payload.name,
+            "raw_key": raw_key,
+            "scopes": payload.scopes
+        })),
+    )
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -1232,6 +1589,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/:tool_name", post(rest_tool_handler))
         .route("/llms.txt", get(llms_txt_handler))
         .route("/_admin", get(admin_dashboard_handler))
+        .route("/_admin/api/state", get(admin_state_api_handler))
+        .route(
+            "/_admin/api/tools/:tool_name/toggle",
+            post(admin_toggle_tool_handler),
+        )
+        .route(
+            "/_admin/api/connections",
+            post(admin_save_connection_handler),
+        )
+        .route("/_admin/api/keys", post(admin_create_api_key_handler))
         .route(
             "/_admin/tickets/:ticket_id/resolve",
             post(resolve_ticket_handler),
@@ -1266,14 +1633,14 @@ async fn main() {
 
     let app = build_router(state);
     let addr: SocketAddr = bind_addr.parse().expect("Adresse d'écoute invalide");
-    tracing::info!("Démon mod_aim démarré sur http://{}", addr);
+    tracing::info!("Démon mod_aim v1.3 démarré sur http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
 // ============================================================================
-// 8. TESTS UNITAIRES & TESTS D'INTÉGRATION DU CONTRAT .AIM
+// 10. TESTS UNITAIRES & D'INTÉGRATION (PHASES 1, 2 & 3)
 // ============================================================================
 
 #[cfg(test)]
@@ -1368,8 +1735,46 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_webhook_signature() {
-        let sig = compute_hmac_sha256("whsec_test_secret", b"{\"event\":\"aim.approval.resolved\"}");
+        let sig = compute_hmac_sha256("whsec_test_secret", b"{"event":"aim.approval.resolved"}");
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), 7 + 64);
+    }
+
+    #[test]
+    fn test_aes256_gcm_vault_roundtrip() {
+        let state = setup_test_state();
+        state
+            .store_vault_secret("stripe_prod", "http_bearer", "sk_live_987654321")
+            .unwrap();
+        let decrypted = state.resolve_vault_secret("stripe_prod").unwrap();
+        assert_eq!(decrypted, "sk_live_987654321");
+    }
+
+    #[test]
+    fn test_tool_enable_disable_switch_and_ticket_persistence() {
+        let state = setup_test_state();
+        assert!(state.is_tool_enabled("search_invoices"));
+        state.set_tool_enabled("search_invoices", false).unwrap();
+        assert!(!state.is_tool_enabled("search_invoices"));
+        state.set_tool_enabled("search_invoices", true).unwrap();
+        assert!(state.is_tool_enabled("search_invoices"));
+
+        let tkt = ApprovalTicket {
+            ticket_id: "tkt_test_001".into(),
+            tool_name: "apply_credit_note".into(),
+            arguments: json!({"invoice_id": 1042, "credit_amount": 50.0}),
+            callback: None,
+            status: "pending".into(),
+            created_at: Utc::now().to_rfc3339(),
+            resolved_at: None,
+            resolved_by: None,
+            human_note: None,
+            modified_arguments: None,
+            execution_result: None,
+        };
+        state.persist_ticket(&tkt);
+        let conn = state.db.lock().unwrap();
+        let loaded = AppState::load_tickets_from_db(&conn).unwrap();
+        assert!(loaded.contains_key("tkt_test_001"));
     }
 }

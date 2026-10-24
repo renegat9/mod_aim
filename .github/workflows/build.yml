@@ -24,20 +24,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Auto-Unpack mod_aim_rust_github_ready.zip (if present)
+      - name: Auto-Unpack ZIP archive (if present)
         run: |
-          if [ -f "mod_aim_rust_github_ready.zip" ]; then
-            echo "Archive ZIP détectée : décompression automatique..."
-            unzip -o mod_aim_rust_github_ready.zip
-            rm -f mod_aim_rust_github_ready.zip
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: décompression automatique de mod_aim_rust_github_ready.zip"
-              git push origin HEAD:main || true
+          for z in mod_aim_phase3_github_ready.zip mod_aim_rust_github_ready.zip; do
+            if [ -f "$z" ]; then
+              echo "Archive $z détectée : décompression automatique..."
+              unzip -o "$z"
+              rm -f "$z"
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add -A
+              if ! git diff --cached --quiet; then
+                git commit -m "chore: décompression automatique de $z"
+                git push origin HEAD:main || true
+              fi
             fi
-          fi
+          done
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -91,4 +93,3 @@ jobs:
         with:
           name: aim-engine-windows-x86_64
           path: target/release/aim-daemon.exe
-

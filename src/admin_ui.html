@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mod_aim — Control Plane Humain (Phase 3)</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface-hover: #334155;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      background: #020617;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .badge {
+      font-size: 0.75rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-weight: 600;
+      background: #0369a1;
+      color: #e0f2fe;
+    }
+    .badge.pending { background: #b45309; color: #fef3c7; }
+    .badge.approved, .badge.enabled { background: #15803d; color: #dcfce7; }
+    .badge.rejected, .badge.disabled { background: #b91c1c; color: #fee2e2; }
+    main {
+      max-width: 1180px;
+      margin: 1.5rem auto;
+      padding: 0 1rem;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.75rem;
+    }
+    .tab-btn {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #020617;
+      border-color: var(--accent);
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+    }
+    .card h2 {
+      margin-top: 0;
+      font-size: 1.1rem;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.75rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #020617;
+      color: #7dd3fc;
+      border-radius: 6px;
+    }
+    code { padding: 0.15rem 0.4rem; font-size: 0.85em; }
+    pre { padding: 0.75rem; overflow-x: auto; margin: 0.4rem 0; font-size: 0.82rem; }
+    button.btn {
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.82rem;
+      margin-right: 0.35rem;
+      margin-bottom: 0.35rem;
+    }
+    .btn-success { background: var(--success); color: #052e16; }
+    .btn-warning { background: var(--warning); color: #451a03; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-primary { background: var(--accent); color: #020617; }
+    input, select, textarea {
+      width: 100%;
+      background: #020617;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.55rem;
+      margin-top: 0.25rem;
+      margin-bottom: 0.75rem;
+      font-family: inherit;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+    }
+    .hidden { display: none; }
+    .muted { color: var(--muted); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>
+      mod_aim
+      <span class="badge">Rust Standalone v1.3 — Phase 3</span>
+      <span class="badge">AES-256-GCM Vault</span>
+    </h1>
+    <div>
+      <button class="btn btn-primary" onclick="refreshAll()">Actualiser</button>
+      <a href="/llms.txt" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.9rem;margin-left:0.5rem;">/llms.txt</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('tab-tickets', this)">Tickets HITL (<span id="count-pending">0</span> en attente)</button>
+      <button class="tab-btn" onclick="showTab('tab-tools', this)">Outils .aim (<span id="count-tools">0</span>)</button>
+      <button class="tab-btn" onclick="showTab('tab-vault', this)">Coffre-Fort Secrets (AES-256-GCM)</button>
+      <button class="tab-btn" onclick="showTab('tab-apikeys', this)">Clés API & Scopes</button>
+      <button class="tab-btn" onclick="showTab('tab-logs', this)">Inspecteur & Logs d'Audit</button>
+    </div>
+
+    <!-- ONGLET 1 : TICKETS HITL -->
+    <section id="tab-tickets" class="card">
+      <h2>File d'Approbation Humaine (HITL)</h2>
+      <p class="muted">Approuvez, modifiez les arguments JSON à la volée ou rejetez les appels sensibles des agents IA.</p>
+      <div id="tickets-container">Chargement...</div>
+    </section>
+
+    <!-- ONGLET 2 : OUTILS .AIM -->
+    <section id="tab-tools" class="card hidden">
+      <h2>Gouvernance des Outils .aim (Hot-Reload)</h2>
+      <p class="muted">Activez ou désactivez chaque outil en temps réel. Les états sont persistés dans SQLite.</p>
+      <div id="tools-container">Chargement...</div>
+    </section>
+
+    <!-- ONGLET 3 : COFFRE-FORT AES-256-GCM -->
+    <section id="tab-vault" class="card hidden">
+      <h2>Coffre-Fort de Connexions (Blind Credentials AES-256-GCM)</h2>
+      <p class="muted">Les secrets enregistrés ici sont chiffrés en AES-256-GCM dans SQLite. Les fichiers <code>.aim</code> ne manipulent que l'alias logique sans jamais pouvoir lire la clé en clair.</p>
+      <div class="grid-2">
+        <div>
+          <h3>Enregistrer un Secret / Connexion</h3>
+          <label>Alias logique (ex: <code>erp_postgres</code>, <code>stripe_api</code>)</label>
+          <input id="vault-alias" placeholder="erp_postgres">
+          <label>Type de connecteur</label>
+          <select id="vault-kind">
+            <option value="sqlite">SQLite / SQL</option>
+            <option value="postgres">PostgreSQL DSN</option>
+            <option value="http_bearer">API HTTP (Bearer Token / Secret)</option>
+          </select>
+          <label>URI / Secret / Token (sera chiffré en AES-256-GCM)</label>
+          <input id="vault-secret" type="password" placeholder="postgres://user:pass@host/db ou sk_live_...">
+          <button class="btn btn-primary" onclick="saveVaultSecret()">Chiffrer & Sauvegarder</button>
+        </div>
+        <div>
+          <h3>Alias Chiffrés Actifs</h3>
+          <div id="vault-list">Chargement...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ONGLET 4 : CLÉS API -->
+    <section id="tab-apikeys" class="card hidden">
+      <h2>Clés API Agents & Scopes</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Générer une Clé API Agent</h3>
+          <label>Nom de l'agent / client</label>
+          <input id="ak-name" placeholder="agent-facturation-prod">
+          <label>Scopes autorisés (séparés par virgule, ou <code>*</code>)</label>
+          <input id="ak-scopes" value="billing:read,billing:write">
+          <button class="btn btn-primary" onclick="createApiKey()">Générer la Clé</button>
+          <div id="ak-created-box" class="hidden" style="margin-top:0.75rem;"></div>
+        </div>
+        <div>
+          <h3>Clés Enregistrées (Hash SHA-256)</h3>
+          <div id="ak-list">Chargement...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ONGLET 5 : LOGS & TESTEUR MCP -->
+    <section id="tab-logs" class="card hidden">
+      <h2>Simulateur MCP en Direct & Journal d'Audit SQLite</h2>
+      <div class="grid-2">
+        <div>
+          <h3>Tester un Appel d'Outil MCP</h3>
+          <label>Outil</label>
+          <input id="test-tool-name" value="search_invoices">
+          <label>Arguments JSON</label>
+          <textarea id="test-tool-args" rows="4">{"client_id": 1, "status": "unpaid"}</textarea>
+          <button class="btn btn-primary" onclick="runMcpTest()">Exécuter via JSON-RPC /mcp</button>
+          <pre id="test-tool-output">Résultat affiché ici...</pre>
+        </div>
+        <div>
+          <h3>Derniers Événements d'Audit</h3>
+          <div id="logs-list">Chargement...</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    function showTab(tabId, btn) {
+      document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
+      document.getElementById(tabId).classList.remove('hidden');
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+
+    async function refreshAll() {
+      try {
+        const res = await fetch('/_admin/api/state');
+        const data = await res.json();
+        renderTickets(data.tickets || []);
+        renderTools(data.tools || []);
+        renderVault(data.vault || []);
+        renderApiKeys(data.api_keys || []);
+        renderLogs(data.audit_logs || []);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderTickets(tickets) {
+      const pendingCount = tickets.filter(t => t.status === 'pending').length;
+      document.getElementById('count-pending').textContent = pendingCount;
+      const el = document.getElementById('tickets-container');
+      if (!tickets.length) {
+        el.innerHTML = '<p class="muted">Aucun ticket HITL pour le moment.</p>';
+        return;
+      }
+      el.innerHTML = tickets.map(t => `
+        <div class="card" style="margin-bottom:0.85rem;background:#0f172a;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
+            <div>
+              <strong>${t.tool_name}</strong> — <code>${t.ticket_id}</code>
+              <span class="badge ${t.status === 'pending' ? 'pending' : (t.status === 'rejected' ? 'rejected' : 'approved')}">${t.status}</span>
+            </div>
+            <span class="muted">${t.created_at}</span>
+          </div>
+          <p class="muted" style="margin:0.4rem 0;">Arguments demandés par l'agent :</p>
+          <pre>${JSON.stringify(t.arguments, null, 2)}</pre>
+          ${t.execution_result ? `<p class="muted" style="margin:0.4rem 0;">Résultat d'exécution :</p><pre>${JSON.stringify(t.execution_result, null, 2)}</pre>` : ''}
+          ${t.status === 'pending' ? `
+            <div style="margin-top:0.75rem;">
+              <label class="muted">Note humaine (optionnelle) :</label>
+              <input id="note-${t.ticket_id}" placeholder="Motif ou commentaire d'approbation/rejet">
+              <label class="muted">Surcharge d'arguments JSON (optionnelle, ex: {"credit_amount": 100.0}) :</label>
+              <input id="mod-${t.ticket_id}" placeholder='Laisser vide pour conserver les arguments initiaux'>
+              <button class="btn btn-success" onclick="resolveTicket('${t.ticket_id}', 'approve')">Approuver & Exécuter</button>
+              <button class="btn btn-danger" onclick="resolveTicket('${t.ticket_id}', 'reject')">Rejeter</button>
+            </div>
+          ` : ''}
+        </div>
+      `).join('');
+    }
+
+    async function resolveTicket(ticketId, action) {
+      const note = document.getElementById('note-' + ticketId)?.value || null;
+      const modRaw = document.getElementById('mod-' + ticketId)?.value || '';
+      let modified_arguments = null;
+      if (modRaw.trim() !== '') {
+        try {
+          modified_arguments = JSON.parse(modRaw);
+        } catch (e) {
+          alert('JSON de surcharge invalide : ' + e.message);
+          return;
+        }
+      }
+      await fetch('/_admin/tickets/' + ticketId + '/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, resolved_by: 'admin_web', human_note: note, modified_arguments })
+      });
+      refreshAll();
+    }
+
+    function renderTools(tools) {
+      document.getElementById('count-tools').textContent = tools.length;
+      const el = document.getElementById('tools-container');
+      if (!tools.length) {
+        el.innerHTML = '<p class="muted">Aucun fichier .aim trouvé.</p>';
+        return;
+      }
+      el.innerHTML = `<table>
+        <thead><tr><th>Outil</th><th>Moteur</th><th>Sécurité / Quotas</th><th>Statut</th><th>Action</th></tr></thead>
+        <tbody>
+          ${tools.map(t => `
+            <tr>
+              <td><strong>${t.name}</strong> <code>v${t.version}</code><br><span class="muted">${t.description}</span></td>
+              <td><code>${t.engine}</code></td>
+              <td>Scope: <code>${t.auth_scope}</code><br>HITL: <code>${t.require_human_approval}</code><br>Max CPU: <code>${t.max_cpu_instructions}</code></td>
+              <td><span class="badge ${t.enabled ? 'enabled' : 'disabled'}">${t.enabled ? 'ACTIF' : 'DÉSACTIVÉ'}</span></td>
+              <td>
+                <button class="btn ${t.enabled ? 'btn-warning' : 'btn-success'}" onclick="toggleTool('${t.name}', ${!t.enabled})">
+                  ${t.enabled ? 'Désactiver' : 'Activer'}
+                </button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    }
+
+    async function toggleTool(name, enabled) {
+      await fetch('/_admin/api/tools/' + name + '/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      refreshAll();
+    }
+
+    function renderVault(vault) {
+      const el = document.getElementById('vault-list');
+      if (!vault.length) {
+        el.innerHTML = '<p class="muted">Aucune connexion enregistrée.</p>';
+        return;
+      }
+      el.innerHTML = `<table>
+        <thead><tr><th>Alias</th><th>Type</th><th>Chiffrement</th><th>Mis à jour</th></tr></thead>
+        <tbody>
+          ${vault.map(v => `
+            <tr>
+              <td><code>${v.alias}</code></td>
+              <td>${v.kind}</td>
+              <td><span class="badge">AES-256-GCM (${v.cipher_preview})</span></td>
+              <td class="muted">${v.updated_at}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    }
+
+    async function saveVaultSecret() {
+      const alias = document.getElementById('vault-alias').value.trim();
+      const kind = document.getElementById('vault-kind').value;
+      const secret = document.getElementById('vault-secret').value;
+      if (!alias || !secret) return alert('Alias et secret requis');
+      await fetch('/_admin/api/connections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias, kind, secret })
+      });
+      document.getElementById('vault-secret').value = '';
+      refreshAll();
+    }
+
+    function renderApiKeys(keys) {
+      const el = document.getElementById('ak-list');
+      if (!keys.length) {
+        el.innerHTML = '<p class="muted">Aucune clé API configurée (mode ouvert par défaut).</p>';
+        return;
+      }
+      el.innerHTML = `<table>
+        <thead><tr><th>Nom</th><th>Préfixe</th><th>Scopes</th><th>Créée le</th></tr></thead>
+        <tbody>
+          ${keys.map(k => `
+            <tr>
+              <td><strong>${k.name}</strong></td>
+              <td><code>${k.key_prefix}...</code></td>
+              <td><code>${k.scopes}</code></td>
+              <td class="muted">${k.created_at}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    }
+
+    async function createApiKey() {
+      const name = document.getElementById('ak-name').value.trim();
+      const scopes = document.getElementById('ak-scopes').value.trim();
+      if (!name) return alert('Nom requis');
+      const res = await fetch('/_admin/api/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, scopes })
+      });
+      const data = await res.json();
+      const box = document.getElementById('ak-created-box');
+      box.classList.remove('hidden');
+      box.innerHTML = `<div class="card" style="background:#052e16;border-color:#22c55e;">
+        <strong>Clé générée (copiez-la maintenant) :</strong><br>
+        <code>${data.raw_key}</code>
+      </div>`;
+      refreshAll();
+    }
+
+    function renderLogs(logs) {
+      const el = document.getElementById('logs-list');
+      if (!logs.length) {
+        el.innerHTML = '<p class="muted">Aucun appel enregistré.</p>';
+        return;
+      }
+      el.innerHTML = `<table>
+        <thead><tr><th>Horodatage</th><th>Outil</th><th>Statut</th><th>Durée</th></tr></thead>
+        <tbody>
+          ${logs.map(l => `
+            <tr>
+              <td class="muted">${l.timestamp}</td>
+              <td><code>${l.tool_name}</code></td>
+              <td><span class="badge ${l.status === 'success' ? 'approved' : 'rejected'}">${l.status}</span></td>
+              <td>${l.duration_ms} ms</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+    }
+
+    async function runMcpTest() {
+      const name = document.getElementById('test-tool-name').value.trim();
+      let args = {};
+      try {
+        args = JSON.parse(document.getElementById('test-tool-args').value);
+      } catch (e) {
+        alert('Arguments JSON invalides');
+        return;
+      }
+      if (name === 'apply_credit_note' && args._wait_sec === undefined) {
+        args._wait_sec = 2; // Réponse rapide pour le testeur web
+      }
+      const res = await fetch('/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'web-test-1',
+          method: 'tools/call',
+          params: { name, arguments: args }
+        })
+      });
+      const out = await res.json();
+      document.getElementById('test-tool-output').textContent = JSON.stringify(out, null, 2);
+      refreshAll();
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 5000);
+  </script>
+</body>
+</html>
