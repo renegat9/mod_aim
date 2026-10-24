@@ -1,0 +1,58 @@
+[tool]
+name = "apply_credit_note"
+description = "Génère une note de crédit et réduit le solde d'une facture."
+version = "1.2.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:write"
+require_human_approval = true
+long_polling_wait_sec = 25
+approval_timeout_sec = 86400
+max_cpu_instructions = 50000
+max_memory_kb = 1024
+
+[input]
+invoice_id = { type = "int", min = 1 }
+credit_amount = { type = "float", min = 0.01, max = 5000.00 }
+reason = { type = "string", min_len = 10, description = "Justification obligatoire pour l'humain" }
+
+[output]
+new_balance = "float"
+credit_note_ref = "string"
+status = "string"
+
+[handler]
+engine = "rhai"
+script = """
+  // 1. Récupération de la facture via le pont sécurisé Rust
+  let inv = env.db_query_one(
+      "erp_postgres",
+      "SELECT amount_total, status FROM invoices WHERE id = :id",
+      #{ id: input.invoice_id }
+  );
+
+  if inv == () {
+      throw #{ code: "INVOICE_NOT_FOUND", hint: "Vérifiez l'existence de invoice_id avec search_invoices." };
+  }
+
+  if inv.amount_total < input.credit_amount {
+      throw #{ code: "AMOUNT_EXCEEDS_BALANCE", max_allowed: inv.amount_total };
+  }
+
+  // 2. Calcul et mise à jour
+  let new_bal = inv.amount_total - input.credit_amount;
+  let ref_code = "CN-" + env.timestamp_sec() + "-" + input.invoice_id;
+
+  env.db_execute(
+      "erp_postgres",
+      "UPDATE invoices SET amount_total = :bal WHERE id = :id",
+      #{ bal: new_bal, id: input.invoice_id }
+  );
+
+  return #{
+      new_balance: new_bal,
+      credit_note_ref: ref_code,
+      status: "applied"
+  };
+"""

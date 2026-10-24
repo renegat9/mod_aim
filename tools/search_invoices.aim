@@ -1,0 +1,29 @@
+[tool]
+name = "search_invoices"
+description = "Recherche les factures d'un client par statut et retourne les montants."
+version = "1.0.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+rate_limit = "60/min"
+timeout_ms = 3000
+
+[input]
+client_id = { type = "int", min = 1, description = "ID unique du client" }
+status = { type = "string", enum = ["paid", "unpaid", "overdue"], default = "unpaid" }
+
+[output]
+type = "array"
+items = { invoice_id = "int", amount_total = "float", due_date = "string" }
+
+[handler]
+engine = "native_sql"
+connection = "erp_postgres"
+query = """
+  SELECT id AS invoice_id, amount_total, due_date
+  FROM invoices
+  WHERE client_id = :client_id AND status = :status
+  ORDER BY due_date ASC LIMIT 50
+"""
