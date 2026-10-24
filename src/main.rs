@@ -296,8 +296,16 @@ pub fn validate_proposed_aim_toml(aim_toml: &str) -> Result<AimToolFile, SelfHea
                 });
             }
             if !wat_src.is_empty() {
+                let wasm_bytes = wat::parse_str(wat_src).map_err(|err| SelfHealingError {
+                    tool: parsed.tool.name.clone(),
+                    phase: "wasm_module_dry_run_compile".into(),
+                    field: Some("handler.wat".into()),
+                    expected_type: Some("valid WAT syntax".into()),
+                    received_value: json!(wat_src),
+                    ai_fix_hint: format!("WAT syntax error: {}.", err),
+                })?;
                 let wasm_engine = wasmi::Engine::default();
-                wasmi::Module::new(&wasm_engine, wat_src.as_bytes()).map_err(|err| {
+                wasmi::Module::new(&wasm_engine, &wasm_bytes[..]).map_err(|err| {
                     SelfHealingError {
                         tool: parsed.tool.name.clone(),
                         phase: "wasm_module_dry_run_compile".into(),
@@ -1017,7 +1025,14 @@ fn execute_wasm_sandbox(
     let engine = wasmi::Engine::new(&config);
 
     let wasm_bytes: Vec<u8> = if let Some(wat_str) = &tool.handler.wat {
-        wat_str.as_bytes().to_vec()
+        wat::parse_str(wat_str).map_err(|e| SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_wat_parse".into(),
+            field: Some("handler.wat".into()),
+            expected_type: Some("valid WAT module".into()),
+            received_value: json!(wat_str),
+            ai_fix_hint: format!("WAT compilation error: {}", e),
+        })?
     } else if let Some(path_str) = &tool.handler.wasm_file {
         fs::read(path_str).map_err(|e| SelfHealingError {
             tool: tool.tool.name.clone(),
