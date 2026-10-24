@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -74,7 +74,7 @@ jobs:
           cd dist && tar -czvf aim-engine-linux-x86_64.tar.gz aim-engine-linux-x86_64
 
       - name: Upload Compiled Binary Artifact (Linux)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: aim-engine-linux-x86_64
           path: |
@@ -87,7 +87,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
 
@@ -101,7 +101,7 @@ jobs:
         run: cargo build --release
 
       - name: Upload Compiled Binary Artifact (Windows)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: aim-engine-windows-x86_64
           path: target/release/aim-daemon.exe

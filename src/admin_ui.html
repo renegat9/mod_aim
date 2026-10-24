@@ -3,12 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mod_aim — Control Plane Humain (Phase 3)</title>
+  <title>mod_aim v2.0 — Control Plane Zero-Trust (Phases 1 à 4)</title>
   <style>
     :root {
       --bg: #0f172a;
       --surface: #1e293b;
-      --surface-hover: #334155;
       --border: #334155;
       --text: #f8fafc;
       --muted: #94a3b8;
@@ -42,6 +41,7 @@
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      flex-wrap: wrap;
     }
     .badge {
       font-size: 0.75rem;
@@ -55,7 +55,7 @@
     .badge.approved, .badge.enabled { background: #15803d; color: #dcfce7; }
     .badge.rejected, .badge.disabled { background: #b91c1c; color: #fee2e2; }
     main {
-      max-width: 1180px;
+      max-width: 1200px;
       margin: 1.5rem auto;
       padding: 0 1rem;
       display: grid;
@@ -77,7 +77,7 @@
       border-radius: 8px;
       cursor: pointer;
       font-weight: 600;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
     .tab-btn.active {
       background: var(--accent);
@@ -94,14 +94,11 @@
       margin-top: 0;
       font-size: 1.1rem;
       color: var(--accent);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
     th, td {
       text-align: left;
@@ -116,8 +113,8 @@
       color: #7dd3fc;
       border-radius: 6px;
     }
-    code { padding: 0.15rem 0.4rem; font-size: 0.85em; }
-    pre { padding: 0.75rem; overflow-x: auto; margin: 0.4rem 0; font-size: 0.82rem; }
+    code { padding: 0.15rem 0.4rem; font-size: 0.84em; }
+    pre { padding: 0.75rem; overflow-x: auto; margin: 0.4rem 0; font-size: 0.8rem; }
     button.btn {
       padding: 0.45rem 0.85rem;
       border-radius: 6px;
@@ -145,7 +142,7 @@
     }
     .grid-2 {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 1rem;
     }
     .hidden { display: none; }
@@ -156,8 +153,9 @@
   <header>
     <h1>
       mod_aim
-      <span class="badge">Rust Standalone v1.3 — Phase 3</span>
-      <span class="badge">AES-256-GCM Vault</span>
+      <span class="badge">v2.0 Standalone</span>
+      <span class="badge">SQL + Rhai + Wasm</span>
+      <span class="badge">Self-Authoring IA</span>
     </h1>
     <div>
       <button class="btn btn-primary" onclick="refreshAll()">Actualiser</button>
@@ -167,44 +165,49 @@
 
   <main>
     <div class="tabs">
-      <button class="tab-btn active" onclick="showTab('tab-tickets', this)">Tickets HITL (<span id="count-pending">0</span> en attente)</button>
+      <button class="tab-btn active" onclick="showTab('tab-tickets', this)">Tickets HITL (<span id="count-pending">0</span>)</button>
       <button class="tab-btn" onclick="showTab('tab-tools', this)">Outils .aim (<span id="count-tools">0</span>)</button>
-      <button class="tab-btn" onclick="showTab('tab-vault', this)">Coffre-Fort Secrets (AES-256-GCM)</button>
-      <button class="tab-btn" onclick="showTab('tab-apikeys', this)">Clés API & Scopes</button>
-      <button class="tab-btn" onclick="showTab('tab-logs', this)">Inspecteur & Logs d'Audit</button>
+      <button class="tab-btn" onclick="showTab('tab-proposals', this)">Propositions IA (<span id="count-proposals">0</span>)</button>
+      <button class="tab-btn" onclick="showTab('tab-vault', this)">Coffre-Fort AES-256</button>
+      <button class="tab-btn" onclick="showTab('tab-apikeys', this)">Clés API</button>
+      <button class="tab-btn" onclick="showTab('tab-logs', this)">Simulateur MCP & Audit</button>
     </div>
 
     <!-- ONGLET 1 : TICKETS HITL -->
     <section id="tab-tickets" class="card">
       <h2>File d'Approbation Humaine (HITL)</h2>
-      <p class="muted">Approuvez, modifiez les arguments JSON à la volée ou rejetez les appels sensibles des agents IA.</p>
       <div id="tickets-container">Chargement...</div>
     </section>
 
     <!-- ONGLET 2 : OUTILS .AIM -->
     <section id="tab-tools" class="card hidden">
-      <h2>Gouvernance des Outils .aim (Hot-Reload)</h2>
-      <p class="muted">Activez ou désactivez chaque outil en temps réel. Les états sont persistés dans SQLite.</p>
+      <h2>Catalogue des Outils .aim Actifs (SQL, Rhai, Wasm)</h2>
       <div id="tools-container">Chargement...</div>
     </section>
 
-    <!-- ONGLET 3 : COFFRE-FORT AES-256-GCM -->
+    <!-- ONGLET 3 : PROPOSITIONS IA (PHASE 4 SELF-AUTHORING) -->
+    <section id="tab-proposals" class="card hidden">
+      <h2>Mode "Self-Authoring" IA — Outils .aim Proposés en Quarantaine</h2>
+      <p class="muted">Lorsqu'un agent IA appelle <code>_system_propose_tool</code>, le moteur vérifie la syntaxe TOML et compile l'AST Rhai ou le module Wasm à blanc avant de placer l'outil ici en attente de votre validation humaine.</p>
+      <div id="proposals-container">Chargement...</div>
+    </section>
+
+    <!-- ONGLET 4 : COFFRE-FORT AES-256-GCM -->
     <section id="tab-vault" class="card hidden">
       <h2>Coffre-Fort de Connexions (Blind Credentials AES-256-GCM)</h2>
-      <p class="muted">Les secrets enregistrés ici sont chiffrés en AES-256-GCM dans SQLite. Les fichiers <code>.aim</code> ne manipulent que l'alias logique sans jamais pouvoir lire la clé en clair.</p>
       <div class="grid-2">
         <div>
           <h3>Enregistrer un Secret / Connexion</h3>
-          <label>Alias logique (ex: <code>erp_postgres</code>, <code>stripe_api</code>)</label>
+          <label>Alias logique</label>
           <input id="vault-alias" placeholder="erp_postgres">
           <label>Type de connecteur</label>
           <select id="vault-kind">
             <option value="sqlite">SQLite / SQL</option>
             <option value="postgres">PostgreSQL DSN</option>
-            <option value="http_bearer">API HTTP (Bearer Token / Secret)</option>
+            <option value="http_bearer">API HTTP (Bearer Token)</option>
           </select>
-          <label>URI / Secret / Token (sera chiffré en AES-256-GCM)</label>
-          <input id="vault-secret" type="password" placeholder="postgres://user:pass@host/db ou sk_live_...">
+          <label>Secret / URI (chiffré en AES-256-GCM)</label>
+          <input id="vault-secret" type="password" placeholder="postgres://... ou sk_live_...">
           <button class="btn btn-primary" onclick="saveVaultSecret()">Chiffrer & Sauvegarder</button>
         </div>
         <div>
@@ -214,15 +217,15 @@
       </div>
     </section>
 
-    <!-- ONGLET 4 : CLÉS API -->
+    <!-- ONGLET 5 : CLÉS API -->
     <section id="tab-apikeys" class="card hidden">
       <h2>Clés API Agents & Scopes</h2>
       <div class="grid-2">
         <div>
           <h3>Générer une Clé API Agent</h3>
-          <label>Nom de l'agent / client</label>
-          <input id="ak-name" placeholder="agent-facturation-prod">
-          <label>Scopes autorisés (séparés par virgule, ou <code>*</code>)</label>
+          <label>Nom de l'agent</label>
+          <input id="ak-name" placeholder="agent-compta">
+          <label>Scopes autorisés</label>
           <input id="ak-scopes" value="billing:read,billing:write">
           <button class="btn btn-primary" onclick="createApiKey()">Générer la Clé</button>
           <div id="ak-created-box" class="hidden" style="margin-top:0.75rem;"></div>
@@ -234,17 +237,17 @@
       </div>
     </section>
 
-    <!-- ONGLET 5 : LOGS & TESTEUR MCP -->
+    <!-- ONGLET 6 : LOGS & TESTEUR MCP -->
     <section id="tab-logs" class="card hidden">
-      <h2>Simulateur MCP en Direct & Journal d'Audit SQLite</h2>
+      <h2>Simulateur MCP JSON-RPC & Journal d'Audit SQLite</h2>
       <div class="grid-2">
         <div>
-          <h3>Tester un Appel d'Outil MCP</h3>
-          <label>Outil</label>
-          <input id="test-tool-name" value="search_invoices">
+          <h3>Tester un Appel d'Outil MCP (SQL, Rhai, Wasm, Meta-Tools)</h3>
+          <label>Nom de l'outil</label>
+          <input id="test-tool-name" value="compute_margin_wasm">
           <label>Arguments JSON</label>
-          <textarea id="test-tool-args" rows="4">{"client_id": 1, "status": "unpaid"}</textarea>
-          <button class="btn btn-primary" onclick="runMcpTest()">Exécuter via JSON-RPC /mcp</button>
+          <textarea id="test-tool-args" rows="4">{"revenue_cents": 150000, "cost_cents": 92500}</textarea>
+          <button class="btn btn-primary" onclick="runMcpTest()">Exécuter via /mcp</button>
           <pre id="test-tool-output">Résultat affiché ici...</pre>
         </div>
         <div>
@@ -269,6 +272,7 @@
         const data = await res.json();
         renderTickets(data.tickets || []);
         renderTools(data.tools || []);
+        renderProposals(data.proposals || []);
         renderVault(data.vault || []);
         renderApiKeys(data.api_keys || []);
         renderLogs(data.audit_logs || []);
@@ -294,15 +298,12 @@
             </div>
             <span class="muted">${t.created_at}</span>
           </div>
-          <p class="muted" style="margin:0.4rem 0;">Arguments demandés par l'agent :</p>
           <pre>${JSON.stringify(t.arguments, null, 2)}</pre>
-          ${t.execution_result ? `<p class="muted" style="margin:0.4rem 0;">Résultat d'exécution :</p><pre>${JSON.stringify(t.execution_result, null, 2)}</pre>` : ''}
+          ${t.execution_result ? `<pre>${JSON.stringify(t.execution_result, null, 2)}</pre>` : ''}
           ${t.status === 'pending' ? `
             <div style="margin-top:0.75rem;">
-              <label class="muted">Note humaine (optionnelle) :</label>
-              <input id="note-${t.ticket_id}" placeholder="Motif ou commentaire d'approbation/rejet">
-              <label class="muted">Surcharge d'arguments JSON (optionnelle, ex: {"credit_amount": 100.0}) :</label>
-              <input id="mod-${t.ticket_id}" placeholder='Laisser vide pour conserver les arguments initiaux'>
+              <input id="note-${t.ticket_id}" placeholder="Note humaine (optionnelle)">
+              <input id="mod-${t.ticket_id}" placeholder='Surcharge JSON optionnelle, ex: {"credit_amount": 100.0}'>
               <button class="btn btn-success" onclick="resolveTicket('${t.ticket_id}', 'approve')">Approuver & Exécuter</button>
               <button class="btn btn-danger" onclick="resolveTicket('${t.ticket_id}', 'reject')">Rejeter</button>
             </div>
@@ -345,7 +346,7 @@
             <tr>
               <td><strong>${t.name}</strong> <code>v${t.version}</code><br><span class="muted">${t.description}</span></td>
               <td><code>${t.engine}</code></td>
-              <td>Scope: <code>${t.auth_scope}</code><br>HITL: <code>${t.require_human_approval}</code><br>Max CPU: <code>${t.max_cpu_instructions}</code></td>
+              <td>Scope: <code>${t.auth_scope}</code> | HITL: <code>${t.require_human_approval}</code> | Max CPU: <code>${t.max_cpu_instructions}</code></td>
               <td><span class="badge ${t.enabled ? 'enabled' : 'disabled'}">${t.enabled ? 'ACTIF' : 'DÉSACTIVÉ'}</span></td>
               <td>
                 <button class="btn ${t.enabled ? 'btn-warning' : 'btn-success'}" onclick="toggleTool('${t.name}', ${!t.enabled})">
@@ -363,6 +364,41 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
+      });
+      refreshAll();
+    }
+
+    function renderProposals(proposals) {
+      const pendingProps = proposals.filter(p => p.status === 'pending_review').length;
+      document.getElementById('count-proposals').textContent = pendingProps;
+      const el = document.getElementById('proposals-container');
+      if (!proposals.length) {
+        el.innerHTML = '<p class="muted">Aucune proposition d'outil IA en attente.</p>';
+        return;
+      }
+      el.innerHTML = proposals.map(p => `
+        <div class="card" style="margin-bottom:0.85rem;background:#0f172a;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+              <strong>${p.tool_name}</strong> (Moteur: <code>${p.engine}</code>)
+              <span class="badge ${p.status === 'pending_review' ? 'pending' : (p.status === 'activated' ? 'approved' : 'rejected')}">${p.status}</span>
+            </div>
+            <span class="muted">${p.created_at}</span>
+          </div>
+          <pre>${p.aim_toml}</pre>
+          ${p.status === 'pending_review' ? `
+            <button class="btn btn-success" onclick="decideProposal('${p.tool_name}', 'activate')">Activer & Écrire dans tools/${p.tool_name}.aim</button>
+            <button class="btn btn-danger" onclick="decideProposal('${p.tool_name}', 'reject')">Rejeter</button>
+          ` : ''}
+        </div>
+      `).join('');
+    }
+
+    async function decideProposal(toolName, action) {
+      await fetch('/_admin/api/proposals/' + toolName + '/decide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
       });
       refreshAll();
     }
@@ -405,7 +441,7 @@
     function renderApiKeys(keys) {
       const el = document.getElementById('ak-list');
       if (!keys.length) {
-        el.innerHTML = '<p class="muted">Aucune clé API configurée (mode ouvert par défaut).</p>';
+        el.innerHTML = '<p class="muted">Aucune clé API configurée.</p>';
         return;
       }
       el.innerHTML = `<table>
@@ -436,8 +472,7 @@
       const box = document.getElementById('ak-created-box');
       box.classList.remove('hidden');
       box.innerHTML = `<div class="card" style="background:#052e16;border-color:#22c55e;">
-        <strong>Clé générée (copiez-la maintenant) :</strong><br>
-        <code>${data.raw_key}</code>
+        <strong>Clé générée :</strong><br><code>${data.raw_key}</code>
       </div>`;
       refreshAll();
     }
@@ -473,7 +508,7 @@
         return;
       }
       if (name === 'apply_credit_note' && args._wait_sec === undefined) {
-        args._wait_sec = 2; // Réponse rapide pour le testeur web
+        args._wait_sec = 2;
       }
       const res = await fetch('/mcp', {
         method: 'POST',

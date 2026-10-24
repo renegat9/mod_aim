@@ -1,16 +1,16 @@
-# `mod_aim` — Édition Standalone Zero-PHP (Rust v1.3 — Phases 1, 2 & 3)
+# `mod_aim` — Édition Standalone Zero-PHP (Rust v2.0 — Phases 1 à 4 Complètes)
 
-Moteur serveur compilé en Rust, sécurisé au niveau de la mémoire (*Memory-Safe*), qui expose des fichiers d'outils déclaratifs `.aim` via **MCP (JSON-RPC 2.0)** et **REST**, avec :
+Moteur serveur compilé en Rust, sécurisé au niveau de la mémoire (*Memory-Safe*), qui expose des fichiers d'outils déclaratifs `.aim` via **MCP (JSON-RPC 2.0)** et **REST**, couvrant les 4 phases de l'architecture :
 
-1. **Zéro Dépendance d'Interpréteur Externe** : Un binaire unique (`aim-daemon`) embarquant le serveur HTTP/MCP (`axum`), la base SQLite en mode WAL (`rusqlite`), le moteur de script sandboxé (`rhai`), le coffre-fort de secrets chiffré **AES-256-GCM** (`aes-gcm`) et l'interface web d'administration complète (`/_admin`).
-2. **Quotas Matériels par Requête** : Limitation stricte du nombre d'instructions CPU (`max_cpu_instructions`) et de la mémoire par exécution de script Rhai.
-3. **Validation Humaine (HITL) en Cascade & Persistance SQLite** :
-   - **Niveau 1** : Long-Polling synchrone (`tokio::sync::oneshot`) pendant `long_polling_wait_sec`.
-   - **Niveau 2** : Webhook sortant signé par `HMAC-SHA256` (`X-AIM-Signature-256`) avec support de la modification d'arguments à la volée par l'humain.
-   - **Niveau 3** : Consultation via le meta-tool natif `_system_check_approval`.
-4. **Control Plane Humain Embarqué (`/_admin`)** :
-   - File d'approbation/modification/rejet des tickets HITL en un clic.
-   - Interrupteur **Actif / Désactivé** en temps réel par outil `.aim` (persisté dans SQLite).
-   - Coffre-fort de connexions **Blind Credentials** chiffré en **AES-256-GCM** (`connections_vault`).
-   - Générateur de clés API agents (stockées sous forme de hash SHA-256 dans `api_keys`).
-   - Simulateur MCP JSON-RPC en direct et journal d'audit SQLite (`audit_logs`).
+1. **Phase 1 — Cœur Rust, Parseur `.aim` & Serveur MCP/REST** :
+   - Surveillance temps réel *Hot-Reload* (`notify`) sur le dossier `tools/`.
+   - Routes MCP (`/mcp`), REST (`/api/v1/:tool_name`) et documentation dynamique (`/llms.txt`).
+2. **Phase 2 — Exécuteurs Zéro-Confiance (`native_sql` & `rhai`) & Auto-Guérison** :
+   - Requêtes préparées SQLite (`rusqlite` en mode WAL) et scripts sandboxés `rhai` bornés par `max_cpu_instructions` et `max_memory_kb`.
+   - Erreurs structurées `AIM_CONTRACT_VIOLATION` avec `ai_fix_hint`.
+3. **Phase 3 — Coffre-Fort `AES-256-GCM`, Control Plane `/_admin` & Cascade HITL** :
+   - Secrets chiffrés en `AES-256-GCM` (`connections_vault`), clés API (`api_keys`), états d'outils (`tool_states`), tickets (`approval_tickets`) et audit (`audit_logs`).
+   - Cascade HITL : Long-Polling `tokio::sync::oneshot`, Webhook signé `HMAC-SHA256` et meta-tool `_system_check_approval`.
+4. **Phase 4 — Mode "Self-Authoring" IA & Sandbox WebAssembly (`engine = "wasm"`)** :
+   - Meta-tools MCP `_system_propose_tool` et `_system_test_tool` : validation TOML, compilation à blanc de l'AST `Rhai` ou du module `Wasm`, mise en quarantaine et activation humaine dans `/_admin`.
+   - Exécuteur WebAssembly (`wasmi`) avec compteur d'instructions CPU (`consume_fuel`) et outil d'exemple `tools/compute_margin_wasm.aim`.

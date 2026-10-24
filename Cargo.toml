@@ -1,8 +1,8 @@
 [package]
 name = "aim-engine"
-version = "1.3.0"
+version = "2.0.0"
 edition = "2021"
-description = "Moteur serveur Rust autonome Zero-Trust (MCP/REST) pour l'exécution d'outils .aim (SQL, HTTP, Rhai) avec Coffre-Fort AES-256-GCM et Control Plane Humain (HITL)"
+description = "Moteur serveur Rust autonome Zero-Trust (MCP/REST) pour l'exécution d'outils .aim (SQL, HTTP, Rhai, WebAssembly) avec Coffre-Fort AES-256-GCM, HITL et Self-Authoring IA"
 license = "MIT"
 
 [[bin]]
@@ -16,6 +16,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 rhai = { version = "1.19", features = ["sync", "serde"] }
+wasmi = "0.40"
 rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 aes-gcm = "0.10"

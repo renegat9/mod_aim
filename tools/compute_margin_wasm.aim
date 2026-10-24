@@ -1,0 +1,33 @@
+[tool]
+name = "compute_margin_wasm"
+description = "Calcule la marge nette en centimes via un module WebAssembly isolé (Phase 4 Wasm Sandbox)."
+version = "1.0.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+max_cpu_instructions = 10000
+max_memory_kb = 512
+
+[input]
+revenue_cents = { type = "int", min = 0, description = "Revenu total en centimes" }
+cost_cents = { type = "int", min = 0, description = "Coût total en centimes" }
+
+[output]
+result = "int"
+engine = "string"
+
+[handler]
+engine = "wasm"
+wasm_export = "compute"
+wasm_param_order = ["revenue_cents", "cost_cents"]
+wat = """
+(module
+  (func (export "compute") (param $rev i64) (param $cost i64) (result i64)
+    local.get $rev
+    local.get $cost
+    i64.sub
+  )
+)
+"""

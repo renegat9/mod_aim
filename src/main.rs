@@ -53,7 +53,11 @@ pub fn encrypt_secret_aes256(master_key: &[u8; 32], plaintext: &str) -> Result<S
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
         .map_err(|e| e.to_string())?;
-    Ok(format!("{}:{}", hex::encode(nonce_bytes), hex::encode(ciphertext)))
+    Ok(format!(
+        "{}:{}",
+        hex::encode(nonce_bytes),
+        hex::encode(ciphertext)
+    ))
 }
 
 pub fn decrypt_secret_aes256(master_key: &[u8; 32], stored: &str) -> Result<String, String> {
@@ -68,9 +72,9 @@ pub fn decrypt_secret_aes256(master_key: &[u8; 32], stored: &str) -> Result<Stri
     let ciphertext = hex::decode(parts[1]).map_err(|e| e.to_string())?;
     let cipher = Aes256Gcm::new_from_slice(master_key).map_err(|e| e.to_string())?;
     let nonce = Nonce::from_slice(&nonce_vec);
-    let plain = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| "Échec du déchiffrement AES-256-GCM (clé maître invalide ou données altérées)".to_string())?;
+    let plain = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| {
+        "Échec du déchiffrement AES-256-GCM (clé maître invalide ou données altérées)".to_string()
+    })?;
     String::from_utf8(plain).map_err(|e| e.to_string())
 }
 
@@ -157,6 +161,14 @@ pub struct HandlerConfig {
     #[serde(default)]
     pub script: Option<String>,
     #[serde(default)]
+    pub wat: Option<String>,
+    #[serde(default)]
+    pub wasm_file: Option<String>,
+    #[serde(default)]
+    pub wasm_export: Option<String>,
+    #[serde(default)]
+    pub wasm_param_order: Option<Vec<String>>,
+    #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub method: Option<String>,
@@ -191,7 +203,7 @@ impl SelfHealingError {
 }
 
 // ============================================================================
-// 4. GESTION DES TICKETS HITL (HUMAN-IN-THE-LOOP) & CALLBACKS
+// 4. GESTION DES TICKETS HITL & AUTO-AUTHORING IA (PHASE 4)
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,8 +240,98 @@ pub struct HumanResolutionRequest {
     pub modified_arguments: Option<Value>,
 }
 
+/// Valide à blanc un fichier `.aim` proposé par une IA (TOML + compilation AST Rhai ou module Wasm)
+pub fn validate_proposed_aim_toml(aim_toml: &str) -> Result<AimToolFile, SelfHealingError> {
+    let parsed: AimToolFile = toml::from_str(aim_toml).map_err(|e| SelfHealingError {
+        tool: "_system_propose_tool".into(),
+        phase: "toml_syntax_validation".into(),
+        field: None,
+        expected_type: Some("valid .aim TOML".into()),
+        received_value: json!(aim_toml),
+        ai_fix_hint: format!(
+            "Invalid TOML syntax in proposed .aim file: {}. Ensure [tool], [security], [input], [output], and [handler] sections are properly formatted.",
+            e
+        ),
+    })?;
+
+    match parsed.handler.engine.as_str() {
+        "native_sql" => {
+            let q = parsed.handler.query.as_deref().unwrap_or("").trim();
+            if q.is_empty() {
+                return Err(SelfHealingError {
+                    tool: parsed.tool.name.clone(),
+                    phase: "sql_validation".into(),
+                    field: Some("handler.query".into()),
+                    expected_type: Some("non-empty SQL string".into()),
+                    received_value: Value::Null,
+                    ai_fix_hint: "Engine 'native_sql' requires a non-empty 'query' in [handler].".into(),
+                });
+            }
+        }
+        "rhai" => {
+            let script = parsed.handler.script.as_deref().unwrap_or("");
+            let engine = Engine::new();
+            engine.compile(script).map_err(|err| SelfHealingError {
+                tool: parsed.tool.name.clone(),
+                phase: "rhai_ast_dry_run_compile".into(),
+                field: Some("handler.script".into()),
+                expected_type: Some("valid Rhai AST".into()),
+                received_value: json!(script),
+                ai_fix_hint: format!(
+                    "Rhai AST compilation failed during dry-run: {}. Fix syntax errors before proposing the tool.",
+                    err
+                ),
+            })?;
+        }
+        "wasm" => {
+            let wat_src = parsed.handler.wat.as_deref().unwrap_or("").trim();
+            if wat_src.is_empty() && parsed.handler.wasm_file.is_none() {
+                return Err(SelfHealingError {
+                    tool: parsed.tool.name.clone(),
+                    phase: "wasm_validation".into(),
+                    field: Some("handler.wat".into()),
+                    expected_type: Some("WAT module or wasm_file".into()),
+                    received_value: Value::Null,
+                    ai_fix_hint: "Engine 'wasm' requires either 'wat' inline WebAssembly text or 'wasm_file' in [handler].".into(),
+                });
+            }
+            if !wat_src.is_empty() {
+                let wasm_engine = wasmi::Engine::default();
+                wasmi::Module::new(&wasm_engine, wat_src.as_bytes()).map_err(|err| {
+                    SelfHealingError {
+                        tool: parsed.tool.name.clone(),
+                        phase: "wasm_module_dry_run_compile".into(),
+                        field: Some("handler.wat".into()),
+                        expected_type: Some("valid WebAssembly module".into()),
+                        received_value: json!(wat_src),
+                        ai_fix_hint: format!(
+                            "WebAssembly module validation failed: {}. Verify your WAT syntax and exported function.",
+                            err
+                        ),
+                    }
+                })?;
+            }
+        }
+        other => {
+            return Err(SelfHealingError {
+                tool: parsed.tool.name.clone(),
+                phase: "engine_validation".into(),
+                field: Some("handler.engine".into()),
+                expected_type: Some("native_sql | rhai | wasm".into()),
+                received_value: json!(other),
+                ai_fix_hint: format!(
+                    "Unknown engine '{}'. Supported engines are 'native_sql', 'rhai', and 'wasm'.",
+                    other
+                ),
+            });
+        }
+    }
+
+    Ok(parsed)
+}
+
 // ============================================================================
-// 5. ÉTAT PARTAGÉ DU MOTEUR & PERSISTANCE SQLITE (PHASE 3)
+// 5. ÉTAT PARTAGÉ DU MOTEUR & PERSISTANCE SQLITE (PHASES 3 & 4)
 // ============================================================================
 
 pub struct AppState {
@@ -303,6 +405,13 @@ impl AppState {
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS proposed_tools (
+                tool_name TEXT PRIMARY KEY,
+                engine TEXT NOT NULL,
+                aim_toml TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -315,7 +424,6 @@ impl AppState {
         )
         .map_err(|e| e.to_string())?;
 
-        // Factures de démonstration
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM invoices", [], |r| r.get(0))
             .unwrap_or(0);
@@ -337,7 +445,6 @@ impl AppState {
             .map_err(|e| e.to_string())?;
         }
 
-        // Connexion par défaut chiffrée en AES-256-GCM dans le coffre-fort
         let vault_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM connections_vault", [], |r| r.get(0))
             .unwrap_or(0);
@@ -395,6 +502,61 @@ impl AppState {
         }
     }
 
+    pub fn save_proposed_tool(&self, parsed: &AimToolFile, raw_toml: &str) -> Result<(), String> {
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO proposed_tools (tool_name, engine, aim_toml, status, created_at)
+             VALUES (?1, ?2, ?3, 'pending_review', ?4)
+             ON CONFLICT(tool_name) DO UPDATE SET
+               engine = excluded.engine,
+               aim_toml = excluded.aim_toml,
+               status = 'pending_review',
+               created_at = excluded.created_at",
+            params![
+                parsed.tool.name,
+                parsed.handler.engine,
+                raw_toml,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn activate_proposed_tool(&self, tool_name: &str) -> Result<(), String> {
+        let raw_toml: String = {
+            let conn = self.db.lock().map_err(|e| e.to_string())?;
+            let toml_str: String = conn
+                .query_row(
+                    "SELECT aim_toml FROM proposed_tools WHERE tool_name = ?1",
+                    params![tool_name],
+                    |r| r.get(0),
+                )
+                .map_err(|_| format!("Proposition '{}' introuvable", tool_name))?;
+            conn.execute(
+                "UPDATE proposed_tools SET status = 'activated' WHERE tool_name = ?1",
+                params![tool_name],
+            )
+            .map_err(|e| e.to_string())?;
+            toml_str
+        };
+
+        let target_path = self.tools_dir.join(format!("{}.aim", tool_name));
+        fs::write(&target_path, raw_toml).map_err(|e| e.to_string())?;
+        self.reload_tools()?;
+        Ok(())
+    }
+
+    pub fn reject_proposed_tool(&self, tool_name: &str) -> Result<(), String> {
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE proposed_tools SET status = 'rejected' WHERE tool_name = ?1",
+            params![tool_name],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn is_tool_enabled(&self, tool_name: &str) -> bool {
         if let Ok(conn) = self.db.lock() {
             conn.query_row(
@@ -420,7 +582,12 @@ impl AppState {
         Ok(())
     }
 
-    pub fn store_vault_secret(&self, alias: &str, kind: &str, plaintext: &str) -> Result<(), String> {
+    pub fn store_vault_secret(
+        &self,
+        alias: &str,
+        kind: &str,
+        plaintext: &str,
+    ) -> Result<(), String> {
         let encrypted = encrypt_secret_aes256(&self.master_key, plaintext)?;
         let conn = self.db.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -440,7 +607,12 @@ impl AppState {
                 params![alias],
                 |r| r.get(0),
             )
-            .map_err(|_| format!("Alias de connexion '{}' introuvable dans le coffre-fort", alias))?;
+            .map_err(|_| {
+                format!(
+                    "Alias de connexion '{}' introuvable dans le coffre-fort",
+                    alias
+                )
+            })?;
         decrypt_secret_aes256(&self.master_key, &enc)
     }
 
@@ -482,7 +654,7 @@ impl AppState {
 }
 
 // ============================================================================
-// 6. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLite + RHAI)
+// 6. VALIDATION DES ENTRÉES / SORTIES & EXÉCUTEURS (SQLite + RHAI + WASM)
 // ============================================================================
 
 pub fn validate_and_prepare_inputs(
@@ -687,7 +859,6 @@ pub fn validate_output_contract(
     Ok(())
 }
 
-/// Transforme une requête SQL avec paramètres nommés `:param` en paramètres positionnels `?`
 fn bind_named_sql(query: &str, params: &HashMap<String, Value>) -> (String, Vec<SqlValue>) {
     let mut final_sql = String::new();
     let mut sql_values = Vec::new();
@@ -771,7 +942,6 @@ fn execute_sql_rows(
     Ok(results)
 }
 
-
 fn json_to_rhai_dynamic(val: &Value) -> Dynamic {
     match val {
         Value::Null => Dynamic::UNIT,
@@ -837,6 +1007,127 @@ struct SandboxEnv {
     db: Arc<Mutex<Connection>>,
 }
 
+/// Exécute un module WebAssembly (`engine = "wasm"`) dans une prison déterministe avec compteur d'instructions (`fuel`)
+fn execute_wasm_sandbox(
+    tool: &AimToolFile,
+    clean_inputs: &HashMap<String, Value>,
+) -> Result<(Value, u64), SelfHealingError> {
+    let mut config = wasmi::Config::default();
+    config.consume_fuel(true);
+    let engine = wasmi::Engine::new(&config);
+
+    let wasm_bytes: Vec<u8> = if let Some(wat_str) = &tool.handler.wat {
+        wat_str.as_bytes().to_vec()
+    } else if let Some(path_str) = &tool.handler.wasm_file {
+        fs::read(path_str).map_err(|e| SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_load".into(),
+            field: Some("handler.wasm_file".into()),
+            expected_type: None,
+            received_value: json!(path_str),
+            ai_fix_hint: format!("Unable to read wasm_file '{}': {}", path_str, e),
+        })?
+    } else {
+        return Err(SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_load".into(),
+            field: Some("handler.wat".into()),
+            expected_type: Some("wat or wasm_file".into()),
+            received_value: Value::Null,
+            ai_fix_hint: "Specify 'wat' or 'wasm_file' in [handler] for engine = 'wasm'.".into(),
+        });
+    };
+
+    let module = wasmi::Module::new(&engine, &wasm_bytes[..]).map_err(|e| SelfHealingError {
+        tool: tool.tool.name.clone(),
+        phase: "wasm_compile".into(),
+        field: None,
+        expected_type: None,
+        received_value: Value::Null,
+        ai_fix_hint: format!("Wasm compilation error: {}", e),
+    })?;
+
+    let mut store = wasmi::Store::new(&engine, ());
+    let max_fuel = tool.security.max_cpu_instructions.max(100);
+    store.set_fuel(max_fuel).map_err(|e| SelfHealingError {
+        tool: tool.tool.name.clone(),
+        phase: "wasm_fuel_init".into(),
+        field: None,
+        expected_type: None,
+        received_value: Value::Null,
+        ai_fix_hint: format!("Failed to initialize Wasm fuel limit: {}", e),
+    })?;
+
+    let linker = <wasmi::Linker<()>>::new(&engine);
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .and_then(|pre| pre.start(&mut store))
+        .map_err(|e| SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_instantiate".into(),
+            field: None,
+            expected_type: None,
+            received_value: Value::Null,
+            ai_fix_hint: format!("Wasm instantiation error: {}", e),
+        })?;
+
+    let export_name = tool.handler.wasm_export.as_deref().unwrap_or("compute");
+    let func = instance
+        .get_func(&store, export_name)
+        .ok_or_else(|| SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_export_lookup".into(),
+            field: Some("handler.wasm_export".into()),
+            expected_type: Some(export_name.to_string()),
+            received_value: Value::Null,
+            ai_fix_hint: format!(
+                "Exported function '{}' not found in Wasm module.",
+                export_name
+            ),
+        })?;
+
+    let ordered_keys: Vec<String> = if let Some(order) = &tool.handler.wasm_param_order {
+        order.clone()
+    } else {
+        let mut keys: Vec<String> = tool.input.keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+
+    let mut wasm_args = Vec::new();
+    for k in &ordered_keys {
+        let v = clean_inputs.get(k).and_then(|val| val.as_i64()).unwrap_or(0);
+        wasm_args.push(wasmi::Val::I64(v));
+    }
+
+    let mut wasm_results = vec![wasmi::Val::I64(0)];
+    func.call(&mut store, &wasm_args, &mut wasm_results)
+        .map_err(|e| SelfHealingError {
+            tool: tool.tool.name.clone(),
+            phase: "wasm_execution".into(),
+            field: None,
+            expected_type: None,
+            received_value: Value::Null,
+            ai_fix_hint: format!("Wasm execution trapped: {}", e),
+        })?;
+
+    let remaining_fuel = store.get_fuel().unwrap_or(0);
+    let consumed_fuel = max_fuel.saturating_sub(remaining_fuel);
+
+    let result_val = match wasm_results.first() {
+        Some(wasmi::Val::I64(v)) => json!(*v),
+        Some(wasmi::Val::I32(v)) => json!(*v),
+        _ => Value::Null,
+    };
+
+    let out = json!({
+        "result": result_val,
+        "engine": "wasm"
+    });
+    validate_output_contract(tool, &out)?;
+    Ok((out, consumed_fuel))
+}
+
 pub fn execute_tool_handler(
     state: &AppState,
     tool: &AimToolFile,
@@ -873,7 +1164,6 @@ pub fn execute_tool_handler(
             let script = tool.handler.script.as_deref().unwrap_or("");
             let mut engine = Engine::new();
 
-            // Quotas matériels Zero-Trust (max_cpu_instructions)
             engine.set_max_operations(tool.security.max_cpu_instructions);
             engine.set_max_string_size(tool.security.max_memory_kb * 1024);
             engine.set_max_array_size(2048);
@@ -959,19 +1249,19 @@ pub fn execute_tool_handler(
                     })?;
 
             let json_out: Value = rhai_dynamic_to_json(&result_dyn);
-
             validate_output_contract(tool, &json_out)?;
             let used_ops = ops_counter.lock().map(|c| *c).unwrap_or(0);
             Ok((json_out, used_ops))
         }
+        "wasm" => execute_wasm_sandbox(tool, clean_inputs),
         other => Err(SelfHealingError {
             tool: tool.tool.name.clone(),
             phase: "handler_dispatch".into(),
             field: Some("engine".into()),
-            expected_type: Some("native_sql | rhai".into()),
+            expected_type: Some("native_sql | rhai | wasm".into()),
             received_value: json!(other),
             ai_fix_hint: format!(
-                "Unsupported engine '{}'. Use 'native_sql' or 'rhai'.",
+                "Unsupported engine '{}'. Use 'native_sql', 'rhai', or 'wasm'.",
                 other
             ),
         }),
@@ -983,8 +1273,8 @@ pub fn execute_tool_handler(
 // ============================================================================
 
 pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
-    let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts keys of any size");
     mac.update(payload);
     let result = mac.finalize().into_bytes();
     format!("sha256={}", hex::encode(result))
@@ -996,7 +1286,7 @@ pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
 
 async fn llms_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tools = state.tools.read().unwrap();
-    let mut doc = String::from("# mod_aim - Catalogue des Outils Actifs (MCP & REST)
+    let mut doc = String::from("# mod_aim v2.0 - Catalogue des Outils Actifs (MCP & REST)
 
 ");
     for t in tools.values() {
@@ -1038,7 +1328,7 @@ async fn mcp_handler(
                 "protocolVersion": "2025-03-26",
                 "serverInfo": {
                     "name": "mod_aim-rust-standalone",
-                    "version": "1.3.0"
+                    "version": "2.0.0"
                 },
                 "capabilities": {
                     "tools": { "listChanged": true }
@@ -1089,15 +1379,35 @@ async fn mcp_handler(
                 })
                 .collect();
 
+            // Meta-tools natifs (Phase 3 HITL + Phase 4 Self-Authoring IA)
             list.push(json!({
                 "name": "_system_check_approval",
                 "description": "Vérifie le statut d'un ticket de validation humaine (HITL).",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "ticket_id": { "type": "string" }
-                    },
+                    "properties": { "ticket_id": { "type": "string" } },
                     "required": ["ticket_id"]
+                }
+            }));
+            list.push(json!({
+                "name": "_system_propose_tool",
+                "description": "Soumet un nouveau fichier .aim (TOML) généré par une IA. Vérifie l'AST Rhai/Wasm à blanc et place l'outil en quarantaine d'approbation humaine dans /_admin.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "aim_toml": { "type": "string" } },
+                    "required": ["aim_toml"]
+                }
+            }));
+            list.push(json!({
+                "name": "_system_test_tool",
+                "description": "Teste à blanc un fichier .aim (ou un outil existant) avec des arguments d'exemple dans la sandbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "aim_toml": { "type": "string" },
+                        "arguments": { "type": "object" }
+                    },
+                    "required": ["aim_toml", "arguments"]
                 }
             }));
 
@@ -1136,6 +1446,69 @@ async fn mcp_handler(
                             "message": format!("Ticket '{}' introuvable.", tkt_id)
                         }
                     }));
+                }
+            }
+
+            if tool_name == "_system_propose_tool" {
+                let raw_toml = args.get("aim_toml").and_then(|v| v.as_str()).unwrap_or("");
+                match validate_proposed_aim_toml(raw_toml) {
+                    Ok(parsed) => {
+                        if let Err(e) = state.save_proposed_tool(&parsed, raw_toml) {
+                            return Json(json!({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": { "code": -32000, "message": e }
+                            }));
+                        }
+                        let resp = json!({
+                            "status": "PROPOSED_PENDING_HUMAN_ACTIVATION",
+                            "tool_name": parsed.tool.name,
+                            "engine": parsed.handler.engine,
+                            "ast_verified": true,
+                            "message": "Outil validé à blanc (TOML + AST) et placé en attente d'activation dans /_admin."
+                        });
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {
+                                "isError": false,
+                                "content": [{ "type": "text", "text": resp.to_string() }]
+                            }
+                        }));
+                    }
+                    Err(he) => return Json(he.to_jsonrpc_error(req_id)),
+                }
+            }
+
+            if tool_name == "_system_test_tool" {
+                let raw_toml = args.get("aim_toml").and_then(|v| v.as_str()).unwrap_or("");
+                let test_args = args.get("arguments").cloned().unwrap_or(json!({}));
+                let parsed = match validate_proposed_aim_toml(raw_toml) {
+                    Ok(p) => p,
+                    Err(he) => return Json(he.to_jsonrpc_error(req_id)),
+                };
+                let clean = match validate_and_prepare_inputs(&parsed, &test_args) {
+                    Ok(c) => c,
+                    Err(he) => return Json(he.to_jsonrpc_error(req_id)),
+                };
+                match execute_tool_handler(&state, &parsed, &clean) {
+                    Ok((out, ops)) => {
+                        let resp = json!({
+                            "status": "DRY_RUN_SUCCESS",
+                            "tool_name": parsed.tool.name,
+                            "cpu_instructions_used": ops,
+                            "output": out
+                        });
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {
+                                "isError": false,
+                                "content": [{ "type": "text", "text": resp.to_string() }]
+                            }
+                        }));
+                    }
+                    Err(he) => return Json(he.to_jsonrpc_error(req_id)),
                 }
             }
 
@@ -1432,7 +1805,7 @@ async fn resolve_ticket_handler(
             let _ = client
                 .post(&cb.url)
                 .header("Content-Type", "application/json")
-                .header("User-Agent", "ModAIM-Rust/1.3")
+                .header("User-Agent", "ModAIM-Rust/2.0")
                 .header("X-AIM-Ticket-ID", &tkt_clone.ticket_id)
                 .header("X-AIM-Signature-256", signature)
                 .body(body_bytes)
@@ -1475,11 +1848,30 @@ async fn admin_state_api_handler(State(state): State<Arc<AppState>>) -> impl Int
         state.tickets.read().unwrap().values().cloned().collect();
     tickets_list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
+    let mut proposals_list = Vec::new();
     let mut vault_list = Vec::new();
     let mut api_keys_list = Vec::new();
     let mut audit_logs_list = Vec::new();
 
     if let Ok(conn) = state.db.lock() {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT tool_name, engine, aim_toml, status, created_at FROM proposed_tools ORDER BY created_at DESC",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(json!({
+                    "tool_name": r.get::<_, String>(0)?,
+                    "engine": r.get::<_, String>(1)?,
+                    "aim_toml": r.get::<_, String>(2)?,
+                    "status": r.get::<_, String>(3)?,
+                    "created_at": r.get::<_, String>(4)?
+                }))
+            }) {
+                for r in rows.flatten() {
+                    proposals_list.push(r);
+                }
+            }
+        }
+
         if let Ok(mut stmt) = conn.prepare(
             "SELECT alias, kind, encrypted_secret, updated_at FROM connections_vault ORDER BY alias ASC",
         ) {
@@ -1541,6 +1933,7 @@ async fn admin_state_api_handler(State(state): State<Arc<AppState>>) -> impl Int
     Json(json!({
         "tools": tools_list,
         "tickets": tickets_list,
+        "proposals": proposals_list,
         "vault": vault_list,
         "api_keys": api_keys_list,
         "audit_logs": audit_logs_list
@@ -1561,6 +1954,33 @@ async fn admin_toggle_tool_handler(
         Ok(_) => (
             StatusCode::OK,
             Json(json!({ "tool": tool_name, "enabled": payload.enabled })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct DecideProposalPayload {
+    action: String, // "activate" | "reject"
+}
+
+async fn admin_decide_proposal_handler(
+    Path(tool_name): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DecideProposalPayload>,
+) -> impl IntoResponse {
+    let res = if payload.action == "activate" {
+        state.activate_proposed_tool(&tool_name)
+    } else {
+        state.reject_proposed_tool(&tool_name)
+    };
+    match res {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "tool": tool_name, "action": payload.action })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1637,6 +2057,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(admin_toggle_tool_handler),
         )
         .route(
+            "/_admin/api/proposals/:tool_name/decide",
+            post(admin_decide_proposal_handler),
+        )
+        .route(
             "/_admin/api/connections",
             post(admin_save_connection_handler),
         )
@@ -1675,14 +2099,14 @@ async fn main() {
 
     let app = build_router(state);
     let addr: SocketAddr = bind_addr.parse().expect("Adresse d'écoute invalide");
-    tracing::info!("Démon mod_aim v1.3 démarré sur http://{}", addr);
+    tracing::info!("Démon mod_aim v2.0 démarré sur http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
 // ============================================================================
-// 10. TESTS UNITAIRES & D'INTÉGRATION (PHASES 1, 2 & 3)
+// 10. TESTS UNITAIRES & D'INTÉGRATION (PHASES 1, 2, 3 & 4)
 // ============================================================================
 
 #[cfg(test)]
@@ -1699,6 +2123,7 @@ mod tests {
         let tools = state.tools.read().unwrap();
         assert!(tools.contains_key("search_invoices"));
         assert!(tools.contains_key("apply_credit_note"));
+        assert!(tools.contains_key("compute_margin_wasm"));
     }
 
     #[test]
@@ -1754,6 +2179,60 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_sandbox_execution_and_fuel_metering() {
+        let state = setup_test_state();
+        let tool = state
+            .tools
+            .read()
+            .unwrap()
+            .get("compute_margin_wasm")
+            .unwrap()
+            .clone();
+
+        let args = json!({
+            "revenue_cents": 150_000,
+            "cost_cents": 92_500
+        });
+        let clean = validate_and_prepare_inputs(&tool, &args).unwrap();
+        let (out, fuel_used) = execute_tool_handler(&state, &tool, &clean).unwrap();
+
+        assert!(fuel_used > 0);
+        assert_eq!(out["result"], json!(57_500));
+        assert_eq!(out["engine"], json!("wasm"));
+    }
+
+    #[test]
+    fn test_self_authoring_propose_and_ast_validation() {
+        let valid_toml = r#"
+[tool]
+name = "calc_discount"
+description = "Calcule une remise simple."
+version = "1.0.0"
+exposure = ["mcp"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+
+[input]
+amount = { type = "float", min = 0.0 }
+
+[output]
+discounted = "float"
+
+[handler]
+engine = "rhai"
+script = "return #{ discounted: input.amount * 0.9 };"
+"#;
+        let parsed = validate_proposed_aim_toml(valid_toml).unwrap();
+        assert_eq!(parsed.tool.name, "calc_discount");
+
+        let bad_rhai_toml = valid_toml.replace("input.amount * 0.9", "let x = ;;;;");
+        let err = validate_proposed_aim_toml(&bad_rhai_toml).unwrap_err();
+        assert_eq!(err.phase, "rhai_ast_dry_run_compile");
+    }
+
+    #[test]
     fn test_self_healing_error_on_invalid_input() {
         let state = setup_test_state();
         let tool = state
@@ -1777,7 +2256,10 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_webhook_signature() {
-        let sig = compute_hmac_sha256("whsec_test_secret", br#"{"event":"aim.approval.resolved"}"#);
+        let sig = compute_hmac_sha256(
+            "whsec_test_secret",
+            br#"{"event":"aim.approval.resolved"}"#,
+        );
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), 7 + 64);
     }
