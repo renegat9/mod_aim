@@ -984,7 +984,7 @@ pub fn execute_tool_handler(
 
 pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
     let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
+        <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
     mac.update(payload);
     let result = mac.finalize().into_bytes();
     format!("sha256={}", hex::encode(result))
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_webhook_signature() {
-        let sig = compute_hmac_sha256("whsec_test_secret", b"{"event":"aim.approval.resolved"}");
+        let sig = compute_hmac_sha256("whsec_test_secret", br#"{"event":"aim.approval.resolved"}"#);
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), 7 + 64);
     }
