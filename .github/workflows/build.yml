@@ -65,11 +65,16 @@ jobs:
           tail -n 80 cargo_test.log cargo_build.log 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Package Linux Release Archive
+      - name: Package Linux Release Archive (Binary + Tools + Docs + Examples + Deploy)
         run: |
-          mkdir -p dist/aim-engine-linux-x86_64/tools
+          mkdir -p dist/aim-engine-linux-x86_64/{tools,docs,examples,deploy/apache,deploy/systemd}
           cp target/release/aim-daemon dist/aim-engine-linux-x86_64/
           cp tools/*.aim dist/aim-engine-linux-x86_64/tools/
+          cp docs/*.md dist/aim-engine-linux-x86_64/docs/ || true
+          cp examples/* dist/aim-engine-linux-x86_64/examples/ || true
+          cp deploy/config.example.toml dist/aim-engine-linux-x86_64/deploy/ || true
+          cp deploy/apache/* dist/aim-engine-linux-x86_64/deploy/apache/ || true
+          cp deploy/systemd/* dist/aim-engine-linux-x86_64/deploy/systemd/ || true
           cp README.md dist/aim-engine-linux-x86_64/ || true
           cd dist && tar -czvf aim-engine-linux-x86_64.tar.gz aim-engine-linux-x86_64
 

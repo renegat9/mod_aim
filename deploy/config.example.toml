@@ -1,0 +1,12 @@
+# Configuration d'exemple pour mod_aim (aim-daemon)
+# Les variables d'environnement AIM_BIND_ADDR, AIM_TOOLS_DIR, AIM_DB_PATH et AIM_MASTER_KEY
+# permettent également de surcharger ces valeurs au démarrage.
+
+[server]
+bind_addr = "127.0.0.1:8080"
+tools_dir = "/var/www/my-project/aim-tools"
+db_path = "/var/lib/aim-engine/engine.sqlite"
+
+[security]
+# Clé maître utilisée pour dériver la clé AES-256-GCM du coffre-fort connections_vault
+master_key_env = "AIM_MASTER_KEY"

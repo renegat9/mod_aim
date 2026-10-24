@@ -1,0 +1,62 @@
+[tool]
+name = "compound_interest_wasm"
+description = "Calcule un capital final avec intérêts composés en points de base (bps) sur N périodes via une boucle WebAssembly isolée."
+version = "1.0.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+max_cpu_instructions = 25000
+max_memory_kb = 512
+
+[input]
+principal_cents = { type = "int", min = 100, description = "Capital initial en centimes (ex: 100000 pour 1000.00$)" }
+rate_bps = { type = "int", min = 1, max = 5000, description = "Taux par période en points de base (ex: 500 pour 5.00%)" }
+periods = { type = "int", min = 1, max = 120, description = "Nombre de périodes de capitalisation" }
+
+[output]
+result = "int"
+engine = "string"
+
+[handler]
+engine = "wasm"
+wasm_export = "compound"
+wasm_param_order = ["principal_cents", "rate_bps", "periods"]
+wat = """
+(module
+  (func (export "compound") (param $principal i64) (param $rate_bps i64) (param $periods i64) (result i64)
+    (local $i i64)
+    (local $acc i64)
+    local.get $principal
+    local.set $acc
+    i64.const 0
+    local.set $i
+    (block $break
+      (loop $top
+        local.get $i
+        local.get $periods
+        i64.ge_s
+        br_if $break
+
+        ;; acc = acc + (acc * rate_bps) / 10000
+        local.get $acc
+        local.get $acc
+        local.get $rate_bps
+        i64.mul
+        i64.const 10000
+        i64.div_s
+        i64.add
+        local.set $acc
+
+        local.get $i
+        i64.const 1
+        i64.add
+        local.set $i
+        br $top
+      )
+    )
+    local.get $acc
+  )
+)
+"""

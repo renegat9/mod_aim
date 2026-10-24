@@ -1,0 +1,53 @@
+[tool]
+name = "customer_billing_summary"
+description = "Analyse le portefeuille de factures d'un client et calcule son exposition et son niveau de risque."
+version = "1.1.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+max_cpu_instructions = 40000
+max_memory_kb = 1024
+
+[input]
+client_id = { type = "int", min = 1, description = "Identifiant unique du client" }
+
+[output]
+client_id = "int"
+unpaid_total = "float"
+overdue_total = "float"
+risk_tier = "string"
+
+[handler]
+engine = "rhai"
+script = """
+  let unpaid = env.db_query_one(
+      "erp_postgres",
+      "SELECT COALESCE(SUM(amount_total), 0.0) AS total FROM invoices WHERE client_id = :cid AND status = 'unpaid'",
+      #{ cid: input.client_id }
+  );
+
+  let overdue = env.db_query_one(
+      "erp_postgres",
+      "SELECT COALESCE(SUM(amount_total), 0.0) AS total FROM invoices WHERE client_id = :cid AND status = 'overdue'",
+      #{ cid: input.client_id }
+  );
+
+  let unpaid_val = unpaid.total;
+  let overdue_val = overdue.total;
+
+  let tier = "LOW";
+  if overdue_val > 1000.0 {
+      tier = "HIGH";
+  } else if overdue_val > 0.0 || unpaid_val > 1000.0 {
+      tier = "MEDIUM";
+  }
+
+  return #{
+      client_id: input.client_id,
+      unpaid_total: unpaid_val,
+      overdue_total: overdue_val,
+      risk_tier: tier
+  };
+"""

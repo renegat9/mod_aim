@@ -1,0 +1,27 @@
+[Unit]
+Description=mod_aim Standalone Rust Engine (MCP & REST Zero-Trust Daemon)
+After=network.target
+
+[Service]
+Type=simple
+User=aim-runner
+Group=aim-runner
+WorkingDirectory=/var/lib/aim-engine
+Environment="AIM_BIND_ADDR=127.0.0.1:8080"
+Environment="AIM_TOOLS_DIR=/var/www/my-project/aim-tools"
+Environment="AIM_DB_PATH=/var/lib/aim-engine/engine.sqlite"
+Environment="AIM_MASTER_KEY=remplacez_moi_par_une_phrase_secrete_de_32_octets_minimum"
+Environment="RUST_LOG=info"
+ExecStart=/usr/local/bin/aim-daemon
+Restart=on-failure
+RestartSec=3
+
+# Durcissement Système Linux (Sandboxing OS supplémentaire)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/aim-engine /var/www/my-project/aim-tools
+
+[Install]
+WantedBy=multi-user.target

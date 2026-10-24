@@ -2139,6 +2139,57 @@ mod tests {
         assert!(tools.contains_key("search_invoices"));
         assert!(tools.contains_key("apply_credit_note"));
         assert!(tools.contains_key("compute_margin_wasm"));
+        assert!(tools.contains_key("customer_billing_summary"));
+        assert!(tools.contains_key("compound_interest_wasm"));
+        assert!(tools.contains_key("cancel_overdue_invoice"));
+    }
+
+    #[test]
+    fn test_customer_billing_summary_rhai_analytics() {
+        let state = setup_test_state();
+        let tool = state
+            .tools
+            .read()
+            .unwrap()
+            .get("customer_billing_summary")
+            .unwrap()
+            .clone();
+
+        let args = json!({ "client_id": 1 });
+        let clean = validate_and_prepare_inputs(&tool, &args).unwrap();
+        let (out, ops) = execute_tool_handler(&state, &tool, &clean).unwrap();
+
+        assert!(ops > 0);
+        assert_eq!(out["client_id"], json!(1));
+        assert_eq!(out["unpaid_total"], json!(500.0));
+        assert_eq!(out["overdue_total"], json!(1250.5));
+        assert_eq!(out["risk_tier"], json!("HIGH"));
+    }
+
+    #[test]
+    fn test_compound_interest_wasm_loop_and_fuel() {
+        let state = setup_test_state();
+        let tool = state
+            .tools
+            .read()
+            .unwrap()
+            .get("compound_interest_wasm")
+            .unwrap()
+            .clone();
+
+        // 1000.00$ (100_000 cents) à 5% (500 bps) sur 3 périodes :
+        // P1: 105_000, P2: 110_250, P3: 115_762
+        let args = json!({
+            "principal_cents": 100_000,
+            "rate_bps": 500,
+            "periods": 3
+        });
+        let clean = validate_and_prepare_inputs(&tool, &args).unwrap();
+        let (out, fuel_used) = execute_tool_handler(&state, &tool, &clean).unwrap();
+
+        assert!(fuel_used > 10);
+        assert_eq!(out["result"], json!(115_762));
+        assert_eq!(out["engine"], json!("wasm"));
     }
 
     #[test]

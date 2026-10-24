@@ -1,0 +1,52 @@
+[tool]
+name = "cancel_overdue_invoice"
+description = "Passe une facture impayée ou en retard au statut 'cancelled' et remet son solde à zéro (Approbation Humaine HITL requise)."
+version = "1.0.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:write"
+require_human_approval = true
+long_polling_wait_sec = 25
+approval_timeout_sec = 86400
+max_cpu_instructions = 30000
+max_memory_kb = 1024
+
+[input]
+invoice_id = { type = "int", min = 1, description = "ID de la facture à annuler" }
+cancellation_reason = { type = "string", min_len = 10, description = "Motif d'annulation présenté à l'approbateur humain" }
+
+[output]
+invoice_id = "int"
+previous_amount = "float"
+new_status = "string"
+
+[handler]
+engine = "rhai"
+script = """
+  let inv = env.db_query_one(
+      "erp_postgres",
+      "SELECT amount_total, status FROM invoices WHERE id = :id",
+      #{ id: input.invoice_id }
+  );
+
+  if inv == () {
+      throw #{ code: "INVOICE_NOT_FOUND", hint: "Aucune facture ne correspond à cet invoice_id." };
+  }
+
+  if inv.status == "paid" {
+      throw #{ code: "CANNOT_CANCEL_PAID_INVOICE", hint: "Une facture déjà payée ne peut pas être annulée directement ; utilisez apply_credit_note." };
+  }
+
+  env.db_execute(
+      "erp_postgres",
+      "UPDATE invoices SET amount_total = 0.0, status = 'cancelled' WHERE id = :id",
+      #{ id: input.invoice_id }
+  );
+
+  return #{
+      invoice_id: input.invoice_id,
+      previous_amount: inv.amount_total,
+      new_status: "cancelled"
+  };
+"""
