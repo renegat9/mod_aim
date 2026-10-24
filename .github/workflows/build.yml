@@ -1,0 +1,94 @@
+name: Unpack ZIP & Build mod_aim (Rust)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unpack-and-build-linux:
+    name: Unpack ZIP, Test & Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Auto-Unpack mod_aim_rust_github_ready.zip (if present)
+        run: |
+          if [ -f "mod_aim_rust_github_ready.zip" ]; then
+            echo "Archive ZIP détectée : décompression automatique..."
+            unzip -o mod_aim_rust_github_ready.zip
+            rm -f mod_aim_rust_github_ready.zip
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: décompression automatique de mod_aim_rust_github_ready.zip"
+              git push origin HEAD:main || true
+            fi
+          fi
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run unit & contract tests
+        run: cargo test --verbose
+
+      - name: Build release binary (aim-daemon)
+        run: cargo build --release --verbose
+
+      - name: Package Linux Release Archive
+        run: |
+          mkdir -p dist/aim-engine-linux-x86_64/tools
+          cp target/release/aim-daemon dist/aim-engine-linux-x86_64/
+          cp tools/*.aim dist/aim-engine-linux-x86_64/tools/
+          cp README.md dist/aim-engine-linux-x86_64/ || true
+          cd dist && tar -czvf aim-engine-linux-x86_64.tar.gz aim-engine-linux-x86_64
+
+      - name: Upload Compiled Binary Artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: aim-engine-linux-x86_64
+          path: |
+            target/release/aim-daemon
+            dist/aim-engine-linux-x86_64.tar.gz
+
+  build-windows:
+    name: Build (Windows x86_64)
+    needs: unpack-and-build-linux
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary (aim-daemon.exe)
+        run: cargo build --release
+
+      - name: Upload Compiled Binary Artifact (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: aim-engine-windows-x86_64
+          path: target/release/aim-daemon.exe
+
