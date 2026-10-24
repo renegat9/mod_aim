@@ -771,6 +771,67 @@ fn execute_sql_rows(
     Ok(results)
 }
 
+
+fn json_to_rhai_dynamic(val: &Value) -> Dynamic {
+    match val {
+        Value::Null => Dynamic::UNIT,
+        Value::Bool(b) => Dynamic::from(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Dynamic::from(i)
+            } else if let Some(f) = n.as_f64() {
+                Dynamic::from_float(f as rhai::FLOAT)
+            } else {
+                Dynamic::UNIT
+            }
+        }
+        Value::String(s) => Dynamic::from(s.clone()),
+        Value::Array(arr) => {
+            let vec: rhai::Array = arr.iter().map(json_to_rhai_dynamic).collect();
+            Dynamic::from_array(vec)
+        }
+        Value::Object(obj) => {
+            let mut map = RhaiMap::new();
+            for (k, v) in obj {
+                map.insert(k.clone().into(), json_to_rhai_dynamic(v));
+            }
+            Dynamic::from_map(map)
+        }
+    }
+}
+
+fn rhai_dynamic_to_json(val: &Dynamic) -> Value {
+    if val.is_unit() {
+        Value::Null
+    } else if let Ok(b) = val.as_bool() {
+        Value::Bool(b)
+    } else if let Ok(i) = val.as_int() {
+        json!(i)
+    } else if let Ok(f) = val.as_float() {
+        json!(f)
+    } else if let Ok(s) = val.clone().into_string() {
+        Value::String(s)
+    } else if let Some(arr) = val.read_lock::<rhai::Array>() {
+        Value::Array(arr.iter().map(rhai_dynamic_to_json).collect())
+    } else if let Some(map) = val.read_lock::<RhaiMap>() {
+        let mut out = serde_json::Map::new();
+        for (k, v) in map.iter() {
+            out.insert(k.to_string(), rhai_dynamic_to_json(v));
+        }
+        Value::Object(out)
+    } else {
+        json!(val.to_string())
+    }
+}
+
+fn rhai_map_to_json_hashmap(map: &RhaiMap) -> HashMap<String, Value> {
+    let mut out = HashMap::new();
+    for (k, v) in map.iter() {
+        out.insert(k.to_string(), rhai_dynamic_to_json(v));
+    }
+    out
+}
+
 #[derive(Clone)]
 struct SandboxEnv {
     db: Arc<Mutex<Connection>>,
@@ -829,6 +890,8 @@ pub fn execute_tool_handler(
 
             engine
                 .register_type_with_name::<SandboxEnv>("SandboxEnv")
+                .register_fn("+", |a: &str, b: i64| -> String { format!("{}{}", a, b) })
+                .register_fn("+", |a: i64, b: &str| -> String { format!("{}{}", a, b) })
                 .register_fn("timestamp_sec", |_env: &mut SandboxEnv| -> String {
                     Utc::now().timestamp().to_string()
                 })
@@ -839,19 +902,11 @@ pub fn execute_tool_handler(
                      sql: &str,
                      params: RhaiMap|
                      -> Dynamic {
-                        let json_params: Value =
-                            rhai::serde::from_dynamic(&Dynamic::from(params)).unwrap_or(json!({}));
-                        let mut map_params = HashMap::new();
-                        if let Some(obj) = json_params.as_object() {
-                            for (k, v) in obj {
-                                map_params.insert(k.clone(), v.clone());
-                            }
-                        }
+                        let map_params = rhai_map_to_json_hashmap(&params);
                         if let Ok(conn) = env.db.lock() {
                             if let Ok(mut rows) = execute_sql_rows(&conn, sql, &map_params) {
                                 if let Some(first) = rows.pop() {
-                                    return rhai::serde::to_dynamic(&first)
-                                        .unwrap_or(Dynamic::UNIT);
+                                    return json_to_rhai_dynamic(&first);
                                 }
                             }
                         }
@@ -861,14 +916,7 @@ pub fn execute_tool_handler(
                 .register_fn(
                     "db_execute",
                     |env: &mut SandboxEnv, _conn_alias: &str, sql: &str, params: RhaiMap| -> i64 {
-                        let json_params: Value =
-                            rhai::serde::from_dynamic(&Dynamic::from(params)).unwrap_or(json!({}));
-                        let mut map_params = HashMap::new();
-                        if let Some(obj) = json_params.as_object() {
-                            for (k, v) in obj {
-                                map_params.insert(k.clone(), v.clone());
-                            }
-                        }
+                        let map_params = rhai_map_to_json_hashmap(&params);
                         let (bound_sql, bind_vals) = bind_named_sql(sql, &map_params);
                         if let Ok(conn) = env.db.lock() {
                             if let Ok(changed) =
@@ -889,9 +937,11 @@ pub fn execute_tool_handler(
                 },
             );
 
-            let input_dyn = rhai::serde::to_dynamic(clean_inputs)
-                .unwrap_or_else(|_| Dynamic::from(RhaiMap::new()));
-            scope.push("input", input_dyn);
+            let mut input_map = RhaiMap::new();
+            for (k, v) in clean_inputs {
+                input_map.insert(k.clone().into(), json_to_rhai_dynamic(v));
+            }
+            scope.push("input", input_map);
 
             let result_dyn: Dynamic =
                 engine
@@ -908,15 +958,7 @@ pub fn execute_tool_handler(
                         ),
                     })?;
 
-            let json_out: Value =
-                rhai::serde::from_dynamic(&result_dyn).map_err(|e| SelfHealingError {
-                    tool: tool.tool.name.clone(),
-                    phase: "output_serialization".into(),
-                    field: None,
-                    expected_type: None,
-                    received_value: Value::Null,
-                    ai_fix_hint: format!("Unable to serialize Rhai return value to JSON: {}", e),
-                })?;
+            let json_out: Value = rhai_dynamic_to_json(&result_dyn);
 
             validate_output_contract(tool, &json_out)?;
             let used_ops = ops_counter.lock().map(|c| *c).unwrap_or(0);

@@ -13,6 +13,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   unpack-and-build-linux:
@@ -24,20 +25,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Auto-Unpack ZIP archive (if present)
+      - name: Auto-Unpack any ZIP archive (if present)
         run: |
-          for z in mod_aim_phase3_github_ready.zip mod_aim_rust_github_ready.zip; do
-            if [ -f "$z" ]; then
-              echo "Archive $z détectée : décompression automatique..."
-              unzip -o "$z"
-              rm -f "$z"
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add -A
-              if ! git diff --cached --quiet; then
-                git commit -m "chore: décompression automatique de $z"
-                git push origin HEAD:main || true
-              fi
+          shopt -s nullglob
+          for z in *.zip; do
+            echo "Archive $z détectée : décompression automatique..."
+            unzip -o "$z"
+            rm -f "$z"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: décompression automatique de $z"
+              git push origin HEAD:main || true
             fi
           done
 
@@ -48,10 +48,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run unit & contract tests
-        run: cargo test --verbose
+        run: |
+          set -o pipefail
+          cargo test -- --nocapture 2>&1 | tee cargo_test.log
 
       - name: Build release binary (aim-daemon)
-        run: cargo build --release --verbose
+        run: |
+          set -o pipefail
+          cargo build --release 2>&1 | tee cargo_build.log
+
+      - name: Publish Diagnostic Summary on Failure
+        if: failure()
+        run: |
+          echo "### Diagnostic Cargo" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          tail -n 80 cargo_test.log cargo_build.log 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Package Linux Release Archive
         run: |
