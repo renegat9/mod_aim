@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -347,6 +347,7 @@ pub struct AppState {
     pub tools: RwLock<HashMap<String, AimToolFile>>,
     pub db: Arc<Mutex<Connection>>,
     pub master_key: [u8; 32],
+    pub admin_password_hash: Option<[u8; 32]>,
     pub tickets: RwLock<HashMap<String, ApprovalTicket>>,
     pub pending_waiters: Mutex<HashMap<String, oneshot::Sender<ApprovalTicket>>>,
 }
@@ -358,6 +359,11 @@ impl AppState {
             .unwrap_or_else(|_| "mod_aim_default_master_key_change_in_prod_2026".into());
         let master_key = derive_master_key(&master_secret);
 
+        let admin_password_hash = std::env::var("AIM_ADMIN_PASSWORD")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|pwd| derive_master_key(&pwd));
+
         Self::init_database(&conn, &master_key)?;
 
         let existing_tickets = Self::load_tickets_from_db(&conn).unwrap_or_default();
@@ -367,6 +373,7 @@ impl AppState {
             tools: RwLock::new(HashMap::new()),
             db: Arc::new(Mutex::new(conn)),
             master_key,
+            admin_password_hash,
             tickets: RwLock::new(existing_tickets),
             pending_waiters: Mutex::new(HashMap::new()),
         });
@@ -622,6 +629,85 @@ impl AppState {
                 )
             })?;
         decrypt_secret_aes256(&self.master_key, &enc)
+    }
+
+    pub fn verify_admin_password(&self, candidate: &str) -> bool {
+        match &self.admin_password_hash {
+            None => true, // Pas de mot de passe configuré en mode dev local
+            Some(expected_hash) => {
+                let candidate_hash = derive_master_key(candidate);
+                let mut diff = 0u8;
+                for i in 0..32 {
+                    diff |= expected_hash[i] ^ candidate_hash[i];
+                }
+                diff == 0
+            }
+        }
+    }
+
+    pub fn verify_admin_headers(&self, headers: &HeaderMap) -> bool {
+        if self.admin_password_hash.is_none() {
+            return true;
+        }
+        if let Some(val) = headers.get("x-aim-admin-password").and_then(|v| v.to_str().ok()) {
+            if self.verify_admin_password(val) {
+                return true;
+            }
+        }
+        if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+            if let Some(token) = auth.strip_prefix("Bearer ") {
+                if self.verify_admin_password(token.trim()) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Vérifie la clé API d'un agent et son scope (si au moins une clé API est enregistrée dans SQLite)
+    pub fn verify_agent_api_key_scope(
+        &self,
+        raw_key: Option<&str>,
+        required_scope: &str,
+    ) -> Result<(), String> {
+        let conn = self.db.lock().map_err(|e| e.to_string())?;
+        let key_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
+            .unwrap_or(0);
+        if key_count == 0 {
+            return Ok(()); // Mode ouvert tant qu'aucune clé API n'a été créée dans /_admin
+        }
+
+        let provided = raw_key
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Clé API manquante (en-tête Authorization: Bearer aim_live_... requis)".to_string())?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(provided.as_bytes());
+        let key_hash = hex::encode(hasher.finalize());
+
+        let scopes_str: String = conn
+            .query_row(
+                "SELECT scopes FROM api_keys WHERE key_hash = ?1",
+                params![key_hash],
+                |r| r.get(0),
+            )
+            .map_err(|_| "Clé API invalide ou révoquée".to_string())?;
+
+        if required_scope.is_empty() {
+            return Ok(());
+        }
+
+        let allowed_scopes: Vec<&str> = scopes_str.split(',').map(|s| s.trim()).collect();
+        if allowed_scopes.contains(&"*") || allowed_scopes.contains(&required_scope) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Scope insuffisant : cette clé API ne possède pas le scope '{}'",
+                required_scope
+            ))
+        }
     }
 
     pub fn reload_tools(&self) -> Result<usize, String> {
@@ -1330,8 +1416,17 @@ async fn llms_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
 
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
+    mcp_handler_inner(state, Some(&headers), payload).await
+}
+
+async fn mcp_handler_inner(
+    state: Arc<AppState>,
+    headers: Option<&HeaderMap>,
+    payload: Value,
+) -> Json<Value> {
     let req_id = payload.get("id").cloned().unwrap_or(Value::Null);
     let method = payload.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -1553,6 +1648,26 @@ async fn mcp_handler(
                 }
             };
 
+            if let Some(hdrs) = headers {
+                let bearer = hdrs
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "));
+                if let Err(auth_err) =
+                    state.verify_agent_api_key_scope(bearer, &tool.security.auth_scope)
+                {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32003,
+                            "message": "AIM_UNAUTHORIZED",
+                            "data": { "reason": auth_err, "required_scope": tool.security.auth_scope }
+                        }
+                    }));
+                }
+            }
+
             let clean_inputs = match validate_and_prepare_inputs(&tool, &args) {
                 Ok(c) => c,
                 Err(he) => return Json(he.to_jsonrpc_error(req_id)),
@@ -1683,6 +1798,7 @@ async fn mcp_handler(
 async fn rest_tool_handler(
     Path(tool_name): Path<String>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> impl IntoResponse {
     let rpc_req = json!({
@@ -1694,14 +1810,21 @@ async fn rest_tool_handler(
             "arguments": args
         }
     });
-    mcp_handler(State(state), Json(rpc_req)).await
+    mcp_handler(State(state), headers, Json(rpc_req)).await
 }
 
 async fn resolve_ticket_handler(
     Path(ticket_id): Path<String>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<HumanResolutionRequest>,
 ) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Mot de passe administrateur (AIM_ADMIN_PASSWORD) requis" })),
+        );
+    }
     let ticket_opt = state.tickets.read().unwrap().get(&ticket_id).cloned();
     let mut ticket = match ticket_opt {
         Some(t) => t,
@@ -1840,7 +1963,16 @@ async fn admin_dashboard_handler() -> impl IntoResponse {
     Html(ADMIN_UI_HTML)
 }
 
-async fn admin_state_api_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn admin_state_api_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
     let tools_map = state.tools.read().unwrap().clone();
     let mut tools_list: Vec<Value> = tools_map
         .values()
@@ -1945,14 +2077,17 @@ async fn admin_state_api_handler(State(state): State<Arc<AppState>>) -> impl Int
         }
     }
 
-    Json(json!({
-        "tools": tools_list,
-        "tickets": tickets_list,
-        "proposals": proposals_list,
-        "vault": vault_list,
-        "api_keys": api_keys_list,
-        "audit_logs": audit_logs_list
-    }))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "tools": tools_list,
+            "tickets": tickets_list,
+            "proposals": proposals_list,
+            "vault": vault_list,
+            "api_keys": api_keys_list,
+            "audit_logs": audit_logs_list
+        })),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1963,8 +2098,15 @@ struct ToggleToolPayload {
 async fn admin_toggle_tool_handler(
     Path(tool_name): Path<String>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<ToggleToolPayload>,
 ) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
     match state.set_tool_enabled(&tool_name, payload.enabled) {
         Ok(_) => (
             StatusCode::OK,
@@ -1985,8 +2127,15 @@ struct DecideProposalPayload {
 async fn admin_decide_proposal_handler(
     Path(tool_name): Path<String>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<DecideProposalPayload>,
 ) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
     let res = if payload.action == "activate" {
         state.activate_proposed_tool(&tool_name)
     } else {
@@ -2013,8 +2162,15 @@ struct SaveConnectionPayload {
 
 async fn admin_save_connection_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SaveConnectionPayload>,
 ) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
     match state.store_vault_secret(&payload.alias, &payload.kind, &payload.secret) {
         Ok(_) => (
             StatusCode::OK,
@@ -2035,8 +2191,15 @@ struct CreateApiKeyPayload {
 
 async fn admin_create_api_key_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<CreateApiKeyPayload>,
 ) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
     let raw_key = format!("aim_live_{}", Uuid::new_v4().simple());
     let prefix = raw_key[..14].to_string();
     let mut hasher = Sha256::new();
@@ -2060,11 +2223,34 @@ async fn admin_create_api_key_handler(
     )
 }
 
-pub fn build_router(state: Arc<AppState>) -> Router {
+async fn admin_simulate_mcp_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    if !state.verify_admin_headers(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Unauthorized" })),
+        );
+    }
+    let Json(resp) = mcp_handler_inner(state, None, payload).await;
+    (StatusCode::OK, Json(resp))
+}
+
+/// Routeur Public (Port 8080 par défaut) : Data Plane Agents uniquement (aucune route /_admin exposée)
+pub fn build_public_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/mcp", post(mcp_handler))
         .route("/api/v1/:tool_name", post(rest_tool_handler))
         .route("/llms.txt", get(llms_txt_handler))
+        .with_state(state)
+}
+
+/// Routeur d'Administration Isolé (Port 8081 par défaut) : Control Plane Humain protégé par AIM_ADMIN_PASSWORD
+pub fn build_admin_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/", get(admin_dashboard_handler))
         .route("/_admin", get(admin_dashboard_handler))
         .route("/_admin/api/state", get(admin_state_api_handler))
         .route(
@@ -2081,6 +2267,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/_admin/api/keys", post(admin_create_api_key_handler))
         .route(
+            "/_admin/api/simulate_mcp",
+            post(admin_simulate_mcp_handler),
+        )
+        .route(
             "/_admin/tickets/:ticket_id/resolve",
             post(resolve_ticket_handler),
         )
@@ -2093,10 +2283,17 @@ async fn main() {
 
     let tools_dir = std::env::var("AIM_TOOLS_DIR").unwrap_or_else(|_| "tools".into());
     let db_path = std::env::var("AIM_DB_PATH").unwrap_or_else(|_| "engine.sqlite".into());
-    let bind_addr = std::env::var("AIM_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let public_bind = std::env::var("AIM_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let admin_bind = std::env::var("AIM_ADMIN_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".into());
 
     let state = AppState::new(PathBuf::from(&tools_dir), &db_path)
         .expect("Impossible d'initialiser l'état de mod_aim");
+
+    if state.admin_password_hash.is_some() {
+        tracing::info!("Protection AIM_ADMIN_PASSWORD active sur le Control Plane.");
+    } else {
+        tracing::warn!("AIM_ADMIN_PASSWORD non défini : le Control Plane est en mode ouvert (définissez AIM_ADMIN_PASSWORD en production).");
+    }
 
     let watcher_state = Arc::clone(&state);
     let watch_path = PathBuf::from(&tools_dir);
@@ -2112,12 +2309,22 @@ async fn main() {
         }
     });
 
-    let app = build_router(state);
-    let addr: SocketAddr = bind_addr.parse().expect("Adresse d'écoute invalide");
-    tracing::info!("Démon mod_aim v2.0 démarré sur http://{}", addr);
+    let public_app = build_public_router(Arc::clone(&state));
+    let admin_app = build_admin_router(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let public_addr: SocketAddr = public_bind.parse().expect("AIM_BIND_ADDR invalide");
+    let admin_addr: SocketAddr = admin_bind.parse().expect("AIM_ADMIN_BIND_ADDR invalide");
+
+    tracing::info!("Data Plane Public (MCP/REST) démarré sur http://{}", public_addr);
+    tracing::info!("Control Plane Humain (/_admin) démarré sur http://{}/_admin", admin_addr);
+
+    let public_listener = tokio::net::TcpListener::bind(public_addr).await.unwrap();
+    let admin_listener = tokio::net::TcpListener::bind(admin_addr).await.unwrap();
+
+    tokio::join!(
+        async { axum::serve(public_listener, public_app).await.unwrap() },
+        async { axum::serve(admin_listener, admin_app).await.unwrap() }
+    );
 }
 
 // ============================================================================
@@ -2366,5 +2573,51 @@ script = "return #{ discounted: input.amount * 0.9 };"
         let conn = state.db.lock().unwrap();
         let loaded = AppState::load_tickets_from_db(&conn).unwrap();
         assert!(loaded.contains_key("tkt_test_001"));
+    }
+
+    #[test]
+    fn test_admin_password_verification() {
+        let state = setup_test_state();
+        // Par défaut en test sans AIM_ADMIN_PASSWORD, verify_admin_password est true
+        assert!(state.verify_admin_password("any"));
+
+        // Vérification directe du hachage constant-time
+        let expected = derive_master_key("SuperSecretAdmin2026!");
+        let cand_ok = derive_master_key("SuperSecretAdmin2026!");
+        let cand_bad = derive_master_key("WrongPassword");
+        assert_eq!(expected, cand_ok);
+        assert_ne!(expected, cand_bad);
+    }
+
+    #[test]
+    fn test_agent_api_key_and_scope_enforcement() {
+        let state = setup_test_state();
+        // Tant qu'aucune clé n'est créée, le mode dev est ouvert
+        assert!(state.verify_agent_api_key_scope(None, "billing:write").is_ok());
+
+        // Insertion d'une clé API limitée à "billing:read"
+        let raw_key = "aim_live_testkey123456";
+        let mut hasher = Sha256::new();
+        hasher.update(raw_key.as_bytes());
+        let key_hash = hex::encode(hasher.finalize());
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO api_keys (name, key_prefix, key_hash, scopes, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params!["agent_lecture_seule", "aim_live_testk", key_hash, "billing:read", Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        // Sans clé -> Rejeté
+        assert!(state.verify_agent_api_key_scope(None, "billing:read").is_err());
+        // Avec la clé sur billing:read -> Autorisé
+        assert!(state
+            .verify_agent_api_key_scope(Some(raw_key), "billing:read")
+            .is_ok());
+        // Avec la clé sur billing:write -> Rejeté (scope insuffisant)
+        assert!(state
+            .verify_agent_api_key_scope(Some(raw_key), "billing:write")
+            .is_err());
     }
 }

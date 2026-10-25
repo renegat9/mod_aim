@@ -1,6 +1,6 @@
 [package]
 name = "aim-engine"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "Moteur serveur Rust autonome Zero-Trust (MCP/REST) pour l'exécution d'outils .aim (SQL, HTTP, Rhai, WebAssembly) avec Coffre-Fort AES-256-GCM, HITL et Self-Authoring IA"
 license = "MIT"

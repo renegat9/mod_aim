@@ -1,0 +1,30 @@
+services:
+  aim-daemon:
+    build: .
+    container_name: mod_aim_daemon
+    restart: unless-stopped
+    ports:
+      # Port Public Data Plane (MCP JSON-RPC 2.0, API REST, /llms.txt)
+      - "8080:8080"
+      # Port Admin Control Plane (lié uniquement à localhost 127.0.0.1 par sécurité)
+      - "127.0.0.1:8081:8081"
+    environment:
+      AIM_BIND_ADDR: "0.0.0.0:8080"
+      AIM_ADMIN_BIND_ADDR: "0.0.0.0:8081"
+      AIM_TOOLS_DIR: "/app/tools"
+      AIM_DB_PATH: "/data/engine.sqlite"
+      AIM_MASTER_KEY: "${AIM_MASTER_KEY:-changez_cette_cle_maitre_aes256_en_production}"
+      AIM_ADMIN_PASSWORD: "${AIM_ADMIN_PASSWORD:-admin_mod_aim_2026}"
+      RUST_LOG: "info"
+    volumes:
+      # Hot-Reload instantané : tout fichier .aim modifié dans ./tools est chargé à chaud
+      - ./tools:/app/tools
+      # Persistance SQLite WAL (coffre-fort AES-256, clés API, tickets HITL, audit)
+      - aim_sqlite_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  aim_sqlite_data:

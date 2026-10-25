@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mod_aim v2.0 — Control Plane Zero-Trust (Phases 1 à 4)</title>
+  <title>mod_aim v2.1 — Control Plane Sécurisé (Port Admin Isolé)</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -145,21 +145,52 @@
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 1rem;
     }
-    .hidden { display: none; }
+    .hidden { display: none !important; }
     .muted { color: var(--muted); font-size: 0.85rem; }
+    #login-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.92);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      padding: 1rem;
+    }
+    .login-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+    }
   </style>
 </head>
 <body>
+  <!-- ÉCRAN DE CONNEXION ADMINISTRATEUR -->
+  <div id="login-overlay" class="hidden">
+    <div class="login-box">
+      <h2 style="margin-top:0;color:var(--accent);">Authentification Control Plane</h2>
+      <p class="muted">Entrez le mot de passe administrateur (<code>AIM_ADMIN_PASSWORD</code>) pour déverrouiller la console <code>/_admin</code>.</p>
+      <label>Mot de passe Administrateur</label>
+      <input id="admin-password-input" type="password" placeholder="Mot de passe AIM_ADMIN_PASSWORD" onkeydown="if(event.key==='Enter') submitLogin()">
+      <p id="login-error" style="color:var(--danger);font-size:0.85rem;" class="hidden">Mot de passe invalide.</p>
+      <button class="btn btn-primary" style="width:100%;padding:0.65rem;" onclick="submitLogin()">Se connecter</button>
+    </div>
+  </div>
+
   <header>
     <h1>
       mod_aim
-      <span class="badge">v2.0 Standalone</span>
-      <span class="badge">SQL + Rhai + Wasm</span>
-      <span class="badge">Self-Authoring IA</span>
+      <span class="badge">v2.1 Dual-Port</span>
+      <span class="badge">Port Admin Isolé</span>
+      <span class="badge">AES-256-GCM</span>
     </h1>
     <div>
       <button class="btn btn-primary" onclick="refreshAll()">Actualiser</button>
-      <a href="/llms.txt" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.9rem;margin-left:0.5rem;">/llms.txt</a>
+      <button class="btn btn-warning" onclick="logoutAdmin()">Déconnexion</button>
     </div>
   </header>
 
@@ -169,30 +200,25 @@
       <button class="tab-btn" onclick="showTab('tab-tools', this)">Outils .aim (<span id="count-tools">0</span>)</button>
       <button class="tab-btn" onclick="showTab('tab-proposals', this)">Propositions IA (<span id="count-proposals">0</span>)</button>
       <button class="tab-btn" onclick="showTab('tab-vault', this)">Coffre-Fort AES-256</button>
-      <button class="tab-btn" onclick="showTab('tab-apikeys', this)">Clés API</button>
+      <button class="tab-btn" onclick="showTab('tab-apikeys', this)">Clés API & Scopes</button>
       <button class="tab-btn" onclick="showTab('tab-logs', this)">Simulateur MCP & Audit</button>
     </div>
 
-    <!-- ONGLET 1 : TICKETS HITL -->
     <section id="tab-tickets" class="card">
       <h2>File d'Approbation Humaine (HITL)</h2>
       <div id="tickets-container">Chargement...</div>
     </section>
 
-    <!-- ONGLET 2 : OUTILS .AIM -->
     <section id="tab-tools" class="card hidden">
       <h2>Catalogue des Outils .aim Actifs (SQL, Rhai, Wasm)</h2>
       <div id="tools-container">Chargement...</div>
     </section>
 
-    <!-- ONGLET 3 : PROPOSITIONS IA (PHASE 4 SELF-AUTHORING) -->
     <section id="tab-proposals" class="card hidden">
       <h2>Mode "Self-Authoring" IA — Outils .aim Proposés en Quarantaine</h2>
-      <p class="muted">Lorsqu'un agent IA appelle <code>_system_propose_tool</code>, le moteur vérifie la syntaxe TOML et compile l'AST Rhai ou le module Wasm à blanc avant de placer l'outil ici en attente de votre validation humaine.</p>
       <div id="proposals-container">Chargement...</div>
     </section>
 
-    <!-- ONGLET 4 : COFFRE-FORT AES-256-GCM -->
     <section id="tab-vault" class="card hidden">
       <h2>Coffre-Fort de Connexions (Blind Credentials AES-256-GCM)</h2>
       <div class="grid-2">
@@ -217,15 +243,15 @@
       </div>
     </section>
 
-    <!-- ONGLET 5 : CLÉS API -->
     <section id="tab-apikeys" class="card hidden">
-      <h2>Clés API Agents & Scopes</h2>
+      <h2>Clés API Agents & Scopes (Protection du Port Public 8080)</h2>
+      <p class="muted">Dès qu'au moins une clé API est créée ici, le port public <code>8080</code> exige l'en-tête <code>Authorization: Bearer aim_live_...</code> et vérifie le <code>auth_scope</code> de chaque outil.</p>
       <div class="grid-2">
         <div>
           <h3>Générer une Clé API Agent</h3>
           <label>Nom de l'agent</label>
           <input id="ak-name" placeholder="agent-compta">
-          <label>Scopes autorisés</label>
+          <label>Scopes autorisés (ex: <code>billing:read,billing:write</code> ou <code>*</code>)</label>
           <input id="ak-scopes" value="billing:read,billing:write">
           <button class="btn btn-primary" onclick="createApiKey()">Générer la Clé</button>
           <div id="ak-created-box" class="hidden" style="margin-top:0.75rem;"></div>
@@ -237,17 +263,16 @@
       </div>
     </section>
 
-    <!-- ONGLET 6 : LOGS & TESTEUR MCP -->
     <section id="tab-logs" class="card hidden">
       <h2>Simulateur MCP JSON-RPC & Journal d'Audit SQLite</h2>
       <div class="grid-2">
         <div>
-          <h3>Tester un Appel d'Outil MCP (SQL, Rhai, Wasm, Meta-Tools)</h3>
+          <h3>Tester un Appel d'Outil MCP</h3>
           <label>Nom de l'outil</label>
           <input id="test-tool-name" value="compute_margin_wasm">
           <label>Arguments JSON</label>
           <textarea id="test-tool-args" rows="4">{"revenue_cents": 150000, "cost_cents": 92500}</textarea>
-          <button class="btn btn-primary" onclick="runMcpTest()">Exécuter via /mcp</button>
+          <button class="btn btn-primary" onclick="runMcpTest()">Exécuter via Simulateur Admin</button>
           <pre id="test-tool-output">Résultat affiché ici...</pre>
         </div>
         <div>
@@ -259,6 +284,45 @@
   </main>
 
   <script>
+    function getAdminToken() {
+      return sessionStorage.getItem('aim_admin_password') || '';
+    }
+
+    function authHeaders() {
+      return {
+        'Content-Type': 'application/json',
+        'X-AIM-Admin-Password': getAdminToken()
+      };
+    }
+
+    async function apiFetch(url, options = {}) {
+      options.headers = Object.assign({}, authHeaders(), options.headers || {});
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        document.getElementById('login-overlay').classList.remove('hidden');
+        throw new Error('Unauthorized');
+      }
+      document.getElementById('login-overlay').classList.add('hidden');
+      return res;
+    }
+
+    async function submitLogin() {
+      const pwd = document.getElementById('admin-password-input').value;
+      sessionStorage.setItem('aim_admin_password', pwd);
+      try {
+        await apiFetch('/_admin/api/state');
+        document.getElementById('login-error').classList.add('hidden');
+        refreshAll();
+      } catch (e) {
+        document.getElementById('login-error').classList.remove('hidden');
+      }
+    }
+
+    function logoutAdmin() {
+      sessionStorage.removeItem('aim_admin_password');
+      document.getElementById('login-overlay').classList.remove('hidden');
+    }
+
     function showTab(tabId, btn) {
       document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
       document.getElementById(tabId).classList.remove('hidden');
@@ -268,7 +332,7 @@
 
     async function refreshAll() {
       try {
-        const res = await fetch('/_admin/api/state');
+        const res = await apiFetch('/_admin/api/state');
         const data = await res.json();
         renderTickets(data.tickets || []);
         renderTools(data.tools || []);
@@ -277,7 +341,7 @@
         renderApiKeys(data.api_keys || []);
         renderLogs(data.audit_logs || []);
       } catch (e) {
-        console.error(e);
+        // Login overlay is automatically shown on 401
       }
     }
 
@@ -324,9 +388,8 @@
           return;
         }
       }
-      await fetch('/_admin/tickets/' + ticketId + '/resolve', {
+      await apiFetch('/_admin/tickets/' + ticketId + '/resolve', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, resolved_by: 'admin_web', human_note: note, modified_arguments })
       });
       refreshAll();
@@ -360,9 +423,8 @@
     }
 
     async function toggleTool(name, enabled) {
-      await fetch('/_admin/api/tools/' + name + '/toggle', {
+      await apiFetch('/_admin/api/tools/' + name + '/toggle', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
       });
       refreshAll();
@@ -395,9 +457,8 @@
     }
 
     async function decideProposal(toolName, action) {
-      await fetch('/_admin/api/proposals/' + toolName + '/decide', {
+      await apiFetch('/_admin/api/proposals/' + toolName + '/decide', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action })
       });
       refreshAll();
@@ -429,9 +490,8 @@
       const kind = document.getElementById('vault-kind').value;
       const secret = document.getElementById('vault-secret').value;
       if (!alias || !secret) return alert('Alias et secret requis');
-      await fetch('/_admin/api/connections', {
+      await apiFetch('/_admin/api/connections', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias, kind, secret })
       });
       document.getElementById('vault-secret').value = '';
@@ -441,7 +501,7 @@
     function renderApiKeys(keys) {
       const el = document.getElementById('ak-list');
       if (!keys.length) {
-        el.innerHTML = '<p class="muted">Aucune clé API configurée.</p>';
+        el.innerHTML = '<p class="muted">Aucune clé API configurée (mode développement ouvert sur le port 8080).</p>';
         return;
       }
       el.innerHTML = `<table>
@@ -463,16 +523,15 @@
       const name = document.getElementById('ak-name').value.trim();
       const scopes = document.getElementById('ak-scopes').value.trim();
       if (!name) return alert('Nom requis');
-      const res = await fetch('/_admin/api/keys', {
+      const res = await apiFetch('/_admin/api/keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, scopes })
       });
       const data = await res.json();
       const box = document.getElementById('ak-created-box');
       box.classList.remove('hidden');
       box.innerHTML = `<div class="card" style="background:#052e16;border-color:#22c55e;">
-        <strong>Clé générée :</strong><br><code>${data.raw_key}</code>
+        <strong>Clé générée (à transmettre dans <code>Authorization: Bearer ...</code> sur le port 8080) :</strong><br><code>${data.raw_key}</code>
       </div>`;
       refreshAll();
     }
@@ -507,12 +566,11 @@
         alert('Arguments JSON invalides');
         return;
       }
-      if (name === 'apply_credit_note' && args._wait_sec === undefined) {
+      if ((name === 'apply_credit_note' || name === 'cancel_overdue_invoice') && args._wait_sec === undefined) {
         args._wait_sec = 2;
       }
-      const res = await fetch('/mcp', {
+      const res = await apiFetch('/_admin/api/simulate_mcp', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jsonrpc: '2.0',
           id: 'web-test-1',
