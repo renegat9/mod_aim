@@ -68,7 +68,8 @@ jobs:
 
       - name: Package Linux Release Archive (Binary + Tools + Docs + Examples + Deploy)
         run: |
-          mkdir -p dist/aim-engine-linux-x86_64/{tools,docs,examples,deploy/apache,deploy/systemd}
+          mkdir -p dist/aim-engine-linux-x86_64/{tools,docs,examples,skills/mod-aim,deploy/apache,deploy/systemd}
+          cp skills/mod-aim/SKILL.md dist/aim-engine-linux-x86_64/skills/mod-aim/ || true
           cp target/release/aim-daemon dist/aim-engine-linux-x86_64/
           cp tools/*.aim dist/aim-engine-linux-x86_64/tools/
           cp docs/*.md dist/aim-engine-linux-x86_64/docs/ || true

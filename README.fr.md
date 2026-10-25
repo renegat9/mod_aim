@@ -26,6 +26,7 @@
    - **Niveau 3** : Consultation par polling via le meta-tool natif `_system_check_approval`.
 5. **Protocole d'Auto-Guérison (`AIM_CONTRACT_VIOLATION`)** : Chaque erreur d'entrée, de sortie ou d'exécution retourne un diagnostic structuré contenant un champ `ai_fix_hint` permettant au LLM de corriger sa requête au tour suivant.
 6. **Mode "Self-Authoring" IA (`_system_propose_tool` & `_system_test_tool`)** : Permet à un agent IA de proposer de nouveaux fichiers `.aim` vérifiés à blanc (compilation AST Rhai / module Wasm) et placés en quarantaine dans `/_admin` jusqu'à leur activation en un clic par un humain.
+7. **Skill IA Prêt à Importer (`skills/mod-aim/SKILL.md`)** : Skill officiel permettant aux agents IA (Gemini, Claude Code, Cursor, Windsurf) d'écrire des outils `.aim`, d'effectuer des appels MCP JSON-RPC 2.0, de gérer les tickets d'approbation HITL et de s'auto-corriger via `AIM_CONTRACT_VIOLATION`.
 
 ---
 
@@ -148,6 +149,21 @@ cargo run --release
 
 ---
 
+## Skill pour Agents IA (`skills/mod-aim/SKILL.md`)
+
+Le dépôt inclut un skill dédié dans [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) qui enseigne automatiquement aux assistants et agents IA comment :
+- Découvrir le catalogue d'outils via `GET /llms.txt` et `POST /mcp` (`tools/list`).
+- Appeler les outils `.aim` en MCP JSON-RPC 2.0 (`tools/call`) et REST (`POST /api/v1/:tool_name`) avec authentification `Bearer`.
+- Gérer la cascade de validation humaine HITL en 3 niveaux (`_wait_sec`, webhooks `_callback` signés `HMAC-SHA256` et polling `_system_check_approval`).
+- S'auto-corriger automatiquement lors d'une erreur `AIM_CONTRACT_VIOLATION` (`-32000`) ou `AIM_RATE_LIMIT_EXCEEDED` (`-32005`) grâce au champ `ai_fix_hint`.
+- Concevoir, tester à blanc (`_system_test_tool`) et soumettre en quarantaine (`_system_propose_tool`) de nouveaux outils `.aim` sur les 4 moteurs (`native_sql`, `native_http`, `rhai`, `wasm`).
+
+### Comment installer le Skill dans votre Agent IA
+- **Claude Code / Agents CLI** : Exécutez `npx skills add https://github.com/renegat9/mod_aim --skill mod-aim` ou copiez [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) dans votre dossier `skills/mod-aim/SKILL.md`.
+- **Gemini / Agents Web** : Importez [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) dans votre gestionnaire de skills ou demandez à l'agent d'importer `https://github.com/renegat9/mod_aim/tree/main/skills/mod-aim`.
+
+---
+
 ## Arborescence du Projet
 
 ```text
@@ -170,6 +186,7 @@ cargo run --release
 │   ├── customer_billing_summary.aim      # [rhai + SQL] Analyse d'exposition et calcul du score de risque client
 │   ├── compute_margin_wasm.aim           # [wasm] Calcul de marge nette en centimes en WebAssembly
 │   └── compound_interest_wasm.aim        # [wasm] Calcul d'intérêts composés en boucle WebAssembly bornée par fuel
+├── skills/mod-aim/SKILL.md               # Skill pour Agents IA (Appels MCP, HITL & création d'outils .aim)
 ├── examples/                             # Scripts prêts à l'emploi pour tester le serveur
 │   ├── demo_mcp_requests.sh              # Scénario complet curl (MCP, REST, Wasm, Auto-Guérison, HITL)
 │   └── webhook_receiver_verify.py        # Serveur Python de vérification des Webhooks signés HMAC-SHA256
@@ -208,6 +225,7 @@ cargo run --release
 
 ## Documentation Complémentaire
 
+* [**🤖 Skill pour Agents IA (`skills/mod-aim/SKILL.md`)**](skills/mod-aim/SKILL.md)
 * [**🇬🇧 English Documentation (`README.md`)**](README.md)
 * [**Spécification du format `.aim` (FR)**](docs/SPECIFICATION_AIM.md) | [**(EN)**](docs/SPECIFICATION_AIM.en.md)
 * [**Guide d'intégration des Agents IA, Cascade HITL & Webhooks (FR)**](docs/GUIDE_AGENTS_ET_HITL.md) | [**(EN)**](docs/GUIDE_AGENTS_AND_HITL.en.md)

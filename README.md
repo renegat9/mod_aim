@@ -26,6 +26,7 @@
    - **Tier 3 (Agent Polling)**: Local agents without an incoming webhook URL can poll the built-in `_system_check_approval` MCP meta-tool.
 5. **Self-Healing Error Protocol (`AIM_CONTRACT_VIOLATION`)**: Schema or runtime violations return structured diagnostics containing an actionable `ai_fix_hint` so LLMs can self-correct on their next turn.
 6. **AI Self-Authoring Quarantine (`_system_propose_tool` & `_system_test_tool`)**: Allows AI agents to test and submit new `.aim` tools. The engine dry-run compiles the Rhai AST or Wasm module and places valid tools in quarantine inside `/_admin` until a human clicks **Activate**.
+7. **Ready-to-Import AI Agent Skill (`skills/mod-aim/SKILL.md`)**: Bundled skill teaching AI coding agents (Gemini, Claude Code, Cursor, Windsurf) how to author `.aim` contracts, invoke `POST /mcp` JSON-RPC 2.0 endpoints, handle HITL approval tickets, and self-heal from `AIM_CONTRACT_VIOLATION` errors.
 
 ---
 
@@ -148,6 +149,21 @@ cargo run --release
 
 ---
 
+## AI Agent Skill (`skills/mod-aim/SKILL.md`)
+
+`mod_aim` ships with a dedicated agent skill in [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) that equips AI assistants with the complete workflow for:
+- Discovering tools via `GET /llms.txt` and `POST /mcp` (`tools/list`).
+- Calling `.aim` tools over MCP JSON-RPC 2.0 (`tools/call`) and REST (`POST /api/v1/:tool_name`) with `Bearer` API keys.
+- Managing the 3-tier Human-in-the-Loop (HITL) cascade (`_wait_sec`, `_callback` `HMAC-SHA256` webhooks, and `_system_check_approval`).
+- Automatically recovering from `AIM_CONTRACT_VIOLATION` (`-32000`) and `AIM_RATE_LIMIT_EXCEEDED` (`-32005`) via `ai_fix_hint`.
+- Authoring, dry-run testing (`_system_test_tool`), and proposing (`_system_propose_tool`) new `.aim` tools across all 4 engines (`native_sql`, `native_http`, `rhai`, `wasm`).
+
+### How to Install the Skill in Your AI Agent
+- **Claude Code / CLI Agents**: Run `npx skills add https://github.com/renegat9/mod_aim --skill mod-aim` or copy [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) into your workspace `.claude/skills/mod-aim/SKILL.md` / `skills/mod-aim/SKILL.md`.
+- **Gemini / Web Agents**: Upload [`skills/mod-aim/SKILL.md`](skills/mod-aim/SKILL.md) in the Skills Manager or ask your agent to import `https://github.com/renegat9/mod_aim/tree/main/skills/mod-aim`.
+
+---
+
 ## Repository Structure
 
 ```text
@@ -170,6 +186,7 @@ cargo run --release
 │   ├── customer_billing_summary.aim      # [rhai + SQL] Client exposure & risk tier analytics
 │   ├── compute_margin_wasm.aim           # [wasm] Net margin calculation in cents via WebAssembly
 │   └── compound_interest_wasm.aim        # [wasm] Fuel-metered compound interest loop in WebAssembly
+├── skills/mod-aim/SKILL.md               # Reusable AI Agent Skill (MCP calls, HITL & .aim authoring)
 ├── examples/                             # Ready-to-run Client & Webhook Examples
 │   ├── demo_mcp_requests.sh              # Full curl walkthrough (MCP, REST, Wasm, Self-Healing, HITL)
 │   └── webhook_receiver_verify.py        # Python Webhook Receiver verifying X-AIM-Signature-256 (HMAC-SHA256)
@@ -208,6 +225,7 @@ cargo run --release
 
 ## Detailed Documentation
 
+* [**🤖 AI Agent Skill (`skills/mod-aim/SKILL.md`)**](skills/mod-aim/SKILL.md)
 * [**🇫🇷 Documentation en Français (`README.fr.md`)**](README.fr.md)
 * [**.aim Format Specification (EN)**](docs/SPECIFICATION_AIM.en.md) | [**(FR)**](docs/SPECIFICATION_AIM.md)
 * [**AI Agent Integration, HITL & Webhooks (EN)**](docs/GUIDE_AGENTS_AND_HITL.en.md) | [**(FR)**](docs/GUIDE_AGENTS_ET_HITL.md)
