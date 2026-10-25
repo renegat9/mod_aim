@@ -1,6 +1,7 @@
 # `mod_aim` — Standalone Zero-Trust Rust Engine for `.aim` AI Tools (MCP & REST)
 
-[![Build & Release mod_aim (Rust)](https://github.com/renegat9/mod_aim/actions/workflows/build.yml/badge.svg)](https://github.com/renegat9/mod_aim/actions/workflows/build.yml)
+[![Latest Release](https://img.shields.io/github/v/release/renegat9/mod_aim?label=Release&color=0284c7)](https://github.com/renegat9/mod_aim/releases/latest)
+[![Build & Release mod_aim (Rust)](https://github.com/renegat9/mod_aim/actions/workflows/build.yml/badge.svg)](https://github.com/renegat9/mod_aim/releases/latest)
 
 **Languages:** [🇬🇧 **English**](README.md) | [🇫🇷 **Français**](README.fr.md)
 
@@ -12,10 +13,11 @@
 
 1. **Zero External Interpreter Dependency**: A single static-style binary (`aim-daemon`) embedding the HTTP/MCP server (`axum`), WAL-mode SQLite persistence (`rusqlite`), sandboxed scripting engine (`rhai`), WebAssembly runtime (`wasmi` + `wat`), **AES-256-GCM** encrypted secrets vault, and embedded human control plane (`/_admin`).
 2. **Dual-Port Zero-Trust Network Isolation**:
-   - **Public Data Plane Port (`8080`)**: Exposes only `/mcp`, `/api/v1/:tool_name`, and `/llms.txt`, protected by Agent API Keys (`Authorization: Bearer aim_live_...`) and per-tool `auth_scope` enforcement. No admin routes exist on this port.
+   - **Public Data Plane Port (`8080`)**: Exposes only `/mcp`, `/api/v1/:tool_name`, and `/llms.txt`, protected by Agent API Keys (`Authorization: Bearer aim_live_...`), per-tool `auth_scope` enforcement, and sliding-window `rate_limit`. No admin routes exist on this port.
    - **Isolated Admin Control Plane Port (`8081`)**: Exposes only `/_admin` and governance APIs, protected by constant-time `SHA-256` verification of `AIM_ADMIN_PASSWORD`.
 3. **4 Embedded Execution Engines (`native_sql` SQLite/PostgreSQL, `native_http`, `rhai`, `wasm`)**:
-   - `native_sql`: Prepared SQL queries with named parameters (`:param`) and zero interpreted code.
+   - `native_sql`: Prepared SQL queries (embedded WAL SQLite or external PostgreSQL DSNs stored encrypted in the vault) with named parameters (`:param`) and zero interpreted code.
+   - `native_http`: Outbound REST calls (`GET`, `POST`, `PUT`, `DELETE`) with `:param` URL substitution and automatic injection of `Authorization: Bearer <secret>` decrypted on the fly from the AES-256-GCM vault.
    - `rhai`: Memory-safe sandboxed business logic with zero OS primitives (no `exec`, filesystem, or raw sockets), strictly bounded by `max_cpu_instructions` and `max_memory_kb`.
    - `wasm`: Isolated WebAssembly module execution with deterministic instruction fuel metering (`consume_fuel`).
 4. **3-Tier Human-in-the-Loop (HITL) Approval Cascade**:
@@ -27,14 +29,77 @@
 
 ---
 
+## Quick Start
+
+### Option 1: Run with Docker Compose (Recommended)
+
+Create a `docker-compose.yml` file (using the official image published on `ghcr.io/renegat9/mod_aim:latest`) and a local `./tools` folder for your `.aim` files:
+
+```yaml
+services:
+  aim-daemon:
+    image: ghcr.io/renegat9/mod_aim:latest
+    container_name: mod_aim_daemon
+    restart: unless-stopped
+    ports:
+      # Public Data Plane Port (MCP JSON-RPC 2.0, REST API, /llms.txt)
+      - "8080:8080"
+      # Isolated Admin Control Plane Port (bound to localhost 127.0.0.1 only)
+      - "127.0.0.1:8081:8081"
+    environment:
+      AIM_BIND_ADDR: "0.0.0.0:8080"
+      AIM_ADMIN_BIND_ADDR: "0.0.0.0:8081"
+      AIM_TOOLS_DIR: "/app/tools"
+      AIM_DB_PATH: "/data/engine.sqlite"
+      AIM_MASTER_KEY: "${AIM_MASTER_KEY:-replace_with_a_32_byte_minimum_aes256_secret}"
+      AIM_ADMIN_PASSWORD: "${AIM_ADMIN_PASSWORD:-replace_with_a_strong_admin_password}"
+      RUST_LOG: "info"
+    volumes:
+      # Instant Hot-Reload: any .aim file added or edited in ./tools is loaded live
+      - ./tools:/app/tools
+      # Persistent WAL SQLite storage (AES-256 vault, API keys, HITL tickets, audit logs)
+      - aim_sqlite_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  aim_sqlite_data:
+```
+
+Start the stack:
+```bash
+docker compose up -d
+```
+* **AI Agent Data Plane (`8080`)**: `http://127.0.0.1:8080/mcp` and `http://127.0.0.1:8080/llms.txt`
+* **Human Control Plane (`8081`)**: `http://127.0.0.1:8081/_admin`
+
+### Option 2: Download Pre-Compiled Binaries (GitHub Releases)
+
+1. Go to the **[Releases](https://github.com/renegat9/mod_aim/releases/latest)** page on GitHub.
+2. Download the archive for your platform:
+   - **Linux (`x86_64`)**: `aim-engine-linux-x86_64.tar.gz` (includes `aim-daemon`, example `.aim` tools, documentation, and Apache/systemd templates).
+   - **Windows (`x86_64`)**: `aim-daemon.exe`.
+3. Extract and launch `./aim-daemon` (Linux) or `aim-daemon.exe` (Windows).
+
+### Option 3: Build from Source
+```bash
+cargo test
+cargo run --release
+```
+
+---
+
 ## Repository Structure
 
 ```text
-├── .github/workflows/build.yml           # GitHub Actions CI/CD (16 Unit Tests + Linux & Windows Binaries)
+├── .github/workflows/build.yml           # CI/CD Pipeline (16 Unit Tests, GitHub Releases & GHCR Docker Image)
 ├── .devcontainer/devcontainer.json       # 1-Click GitHub Codespaces Configuration (Ports 8080 & 8081)
 ├── Cargo.toml                            # Rust Manifest & Dependencies (v2.2.0)
 ├── Dockerfile                            # Multi-stage Zero-Trust Docker Image (non-root aim-runner user)
 ├── docker-compose.yml                    # Docker Compose Stack (Public 8080 + Local-only 8081 + Volumes)
+├── LICENSE                               # MIT License
 ├── README.md                             # English Documentation (Default)
 ├── README.fr.md                          # Documentation Française
 ├── src/
@@ -42,6 +107,7 @@
 │   └── admin_ui.html                     # Embedded SPA Human Control Plane UI
 ├── tools/                                # Hot-Reloaded .aim Tool Definitions (watched via notify)
 │   ├── search_invoices.aim               # [native_sql] Declarative invoice search by client & status
+│   ├── check_external_status_http.aim    # [native_http] Outbound REST call with Blind Bearer Credential
 │   ├── apply_credit_note.aim             # [rhai + HITL] Credit note generation with human approval
 │   ├── cancel_overdue_invoice.aim        # [rhai + HITL] Controlled overdue invoice cancellation
 │   ├── customer_billing_summary.aim      # [rhai + SQL] Client exposure & risk tier analytics
@@ -54,36 +120,11 @@
 │   ├── config.example.toml               # Example configuration file
 │   ├── apache/mod_aim_vhost.conf         # Hardened Apache 2.4 Reverse Proxy VirtualHost
 │   └── systemd/aim-daemon.service        # Hardened systemd service unit (NoNewPrivileges, ProtectSystem=strict)
-└── docs/                                 # Detailed Technical Guides
-    ├── SPECIFICATION_AIM.md              # Full .aim TOML Specification & Engine Reference
-    ├── GUIDE_AGENTS_ET_HITL.md           # Agent Integration, HITL Cascade, Webhooks & Self-Authoring
-    ├── DOCKER_ET_SECURITE_ADMIN.md       # Docker Deployment, Dual-Port 8080/8081 & Admin Security
-    └── DEPLOIEMENT_APACHE.md             # Linux, Systemd & Apache 2.4 Production Setup Guide
-```
-
----
-
-## Quick Start
-
-### Option 1: Run with Docker Compose (Recommended)
-```bash
-export AIM_MASTER_KEY="your_32_byte_minimum_aes256_master_secret"
-export AIM_ADMIN_PASSWORD="your_strong_admin_password"
-
-docker compose up -d --build
-```
-* **AI Agent Data Plane (`8080`)**: `http://127.0.0.1:8080/mcp` and `http://127.0.0.1:8080/llms.txt`
-* **Human Control Plane (`8081`)**: `http://127.0.0.1:8081/_admin`
-
-### Option 2: Download Pre-Compiled Binaries (GitHub Actions)
-1. Open the **[Actions](https://github.com/renegat9/mod_aim/actions)** tab on GitHub.
-2. Select the latest successful workflow run and download **`aim-engine-linux-x86_64`** or **`aim-engine-windows-x86_64`** under **Artifacts**.
-3. Run `./aim-daemon` (Linux) or `aim-daemon.exe` (Windows).
-
-### Option 3: Build from Source
-```bash
-cargo test
-cargo run --release
+└── docs/                                 # Detailed Technical Guides (EN & FR)
+    ├── SPECIFICATION_AIM.en.md           # Full .aim TOML Specification & Engine Reference (EN / FR)
+    ├── GUIDE_AGENTS_AND_HITL.en.md       # Agent Integration, HITL Cascade, Webhooks & Self-Authoring (EN / FR)
+    ├── DOCKER_AND_ADMIN_SECURITY.en.md   # Docker Deployment, Dual-Port 8080/8081 & Admin Security (EN / FR)
+    └── APACHE_DEPLOYMENT.en.md           # Linux, Systemd & Apache 2.4 Production Setup Guide (EN / FR)
 ```
 
 ---

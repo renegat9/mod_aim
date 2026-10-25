@@ -143,6 +143,11 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
       - name: Download Linux Artifact
         uses: actions/download-artifact@v5
         with:
@@ -160,17 +165,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v2.2.0"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
-              release_assets/linux/dist/aim-engine-linux-x86_64.tar.gz \
-              release_assets/windows/aim-daemon.exe \
-              --clobber
+          LINUX_TAR=$(find release_assets/linux -name "aim-engine-linux-x86_64.tar.gz" | head -n 1)
+          WIN_EXE=$(find release_assets/windows -name "aim-daemon.exe" | head -n 1)
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$LINUX_TAR" "$WIN_EXE" --clobber --repo "${{ github.repository }}"
           else
-            gh release create "$TAG" \
-              release_assets/linux/dist/aim-engine-linux-x86_64.tar.gz \
-              release_assets/windows/aim-daemon.exe \
+            gh release create "$TAG" "$LINUX_TAR" "$WIN_EXE" \
+              --repo "${{ github.repository }}" \
               --title "mod_aim v2.2.0 — Standalone Zero-Trust Rust Engine" \
               --notes "Binaires pré-compilés Linux (x86_64) et Windows (x86_64) + Image Docker officielle sur \`ghcr.io/${{ github.repository }}:latest\`."
           fi
