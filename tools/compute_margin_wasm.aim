@@ -1,6 +1,6 @@
 [tool]
 name = "compute_margin_wasm"
-description = "Calcule la marge nette en centimes via un module WebAssembly isolé (Phase 4 Wasm Sandbox)."
+description = "Calcule la marge nette en centimes via un module WebAssembly isolé."
 version = "1.0.0"
 exposure = ["mcp", "rest"]
 

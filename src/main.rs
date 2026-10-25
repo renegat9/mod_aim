@@ -203,7 +203,7 @@ impl SelfHealingError {
 }
 
 // ============================================================================
-// 4. GESTION DES TICKETS HITL & AUTO-AUTHORING IA (PHASE 4)
+// 4. GESTION DES TICKETS HITL & AUTO-AUTHORING IA
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,7 +339,7 @@ pub fn validate_proposed_aim_toml(aim_toml: &str) -> Result<AimToolFile, SelfHea
 }
 
 // ============================================================================
-// 5. ÉTAT PARTAGÉ DU MOTEUR & PERSISTANCE SQLITE (PHASES 3 & 4)
+// 5. ÉTAT PARTAGÉ DU MOTEUR & PERSISTANCE SQLITE
 // ============================================================================
 
 pub struct AppState {
@@ -1489,7 +1489,7 @@ async fn mcp_handler_inner(
                 })
                 .collect();
 
-            // Meta-tools natifs (Phase 3 HITL + Phase 4 Self-Authoring IA)
+            // Meta-tools natifs (HITL + Self-Authoring IA)
             list.push(json!({
                 "name": "_system_check_approval",
                 "description": "Vérifie le statut d'un ticket de validation humaine (HITL).",
@@ -2328,7 +2328,7 @@ async fn main() {
 }
 
 // ============================================================================
-// 10. TESTS UNITAIRES & D'INTÉGRATION (PHASES 1, 2, 3 & 4)
+// 10. TESTS UNITAIRES & D'INTÉGRATION
 // ============================================================================
 
 #[cfg(test)]

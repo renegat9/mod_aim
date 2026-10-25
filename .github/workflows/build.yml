@@ -75,7 +75,7 @@ jobs:
           cp deploy/config.example.toml dist/aim-engine-linux-x86_64/deploy/ || true
           cp deploy/apache/* dist/aim-engine-linux-x86_64/deploy/apache/ || true
           cp deploy/systemd/* dist/aim-engine-linux-x86_64/deploy/systemd/ || true
-          cp README.md Dockerfile docker-compose.yml dist/aim-engine-linux-x86_64/ || true
+          cp README.md README_FR.md Dockerfile docker-compose.yml dist/aim-engine-linux-x86_64/ || true
           cd dist && tar -czvf aim-engine-linux-x86_64.tar.gz aim-engine-linux-x86_64
 
       - name: Upload Compiled Binary Artifact (Linux)
