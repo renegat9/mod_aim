@@ -14,7 +14,7 @@
 2. **Dual-Port Zero-Trust Network Isolation**:
    - **Public Data Plane Port (`8080`)**: Exposes only `/mcp`, `/api/v1/:tool_name`, and `/llms.txt`, protected by Agent API Keys (`Authorization: Bearer aim_live_...`) and per-tool `auth_scope` enforcement. No admin routes exist on this port.
    - **Isolated Admin Control Plane Port (`8081`)**: Exposes only `/_admin` and governance APIs, protected by constant-time `SHA-256` verification of `AIM_ADMIN_PASSWORD`.
-3. **3 Embedded Execution Engines**:
+3. **4 Embedded Execution Engines (`native_sql` SQLite/PostgreSQL, `native_http`, `rhai`, `wasm`)**:
    - `native_sql`: Prepared SQL queries with named parameters (`:param`) and zero interpreted code.
    - `rhai`: Memory-safe sandboxed business logic with zero OS primitives (no `exec`, filesystem, or raw sockets), strictly bounded by `max_cpu_instructions` and `max_memory_kb`.
    - `wasm`: Isolated WebAssembly module execution with deterministic instruction fuel metering (`consume_fuel`).
@@ -30,15 +30,15 @@
 ## Repository Structure
 
 ```text
-├── .github/workflows/build.yml           # GitHub Actions CI/CD (13 Unit Tests + Linux & Windows Binaries)
+├── .github/workflows/build.yml           # GitHub Actions CI/CD (16 Unit Tests + Linux & Windows Binaries)
 ├── .devcontainer/devcontainer.json       # 1-Click GitHub Codespaces Configuration (Ports 8080 & 8081)
-├── Cargo.toml                            # Rust Manifest & Dependencies (v2.1.0)
+├── Cargo.toml                            # Rust Manifest & Dependencies (v2.2.0)
 ├── Dockerfile                            # Multi-stage Zero-Trust Docker Image (non-root aim-runner user)
 ├── docker-compose.yml                    # Docker Compose Stack (Public 8080 + Local-only 8081 + Volumes)
 ├── README.md                             # English Documentation (Default)
 ├── README.fr.md                          # Documentation Française
 ├── src/
-│   ├── main.rs                           # Core mod_aim Engine + 13 Unit & Contract Tests
+│   ├── main.rs                           # Core mod_aim Engine + 16 Unit & Contract Tests
 │   └── admin_ui.html                     # Embedded SPA Human Control Plane UI
 ├── tools/                                # Hot-Reloaded .aim Tool Definitions (watched via notify)
 │   ├── search_invoices.aim               # [native_sql] Declarative invoice search by client & status
@@ -111,7 +111,8 @@ cargo run --release
 ## Detailed Documentation
 
 * [**🇫🇷 Documentation en Français (`README.fr.md`)**](README.fr.md)
-* [**.aim Format Specification (`docs/SPECIFICATION_AIM.md`)**](docs/SPECIFICATION_AIM.md)
-* [**AI Agent Integration, HITL Cascade & Webhooks (`docs/GUIDE_AGENTS_ET_HITL.md`)**](docs/GUIDE_AGENTS_ET_HITL.md)
-* [**Docker Deployment & Dual-Port Admin Security (`docs/DOCKER_ET_SECURITE_ADMIN.md`)**](docs/DOCKER_ET_SECURITE_ADMIN.md)
-* [**Apache 2.4 & Systemd Production Guide (`docs/DEPLOIEMENT_APACHE.md`)**](docs/DEPLOIEMENT_APACHE.md)
+* [**.aim Format Specification (EN)**](docs/SPECIFICATION_AIM.en.md) | [**(FR)**](docs/SPECIFICATION_AIM.md)
+* [**AI Agent Integration, HITL & Webhooks (EN)**](docs/GUIDE_AGENTS_AND_HITL.en.md) | [**(FR)**](docs/GUIDE_AGENTS_ET_HITL.md)
+* [**Docker Deployment & Dual-Port Security (EN)**](docs/DOCKER_AND_ADMIN_SECURITY.en.md) | [**(FR)**](docs/DOCKER_ET_SECURITE_ADMIN.md)
+* [**Apache 2.4 & Systemd Production Guide (EN)**](docs/APACHE_DEPLOYMENT.en.md) | [**(FR)**](docs/DEPLOIEMENT_APACHE.md)
+* [**MIT License (`LICENSE`)**](LICENSE)

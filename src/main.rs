@@ -79,6 +79,43 @@ pub fn decrypt_secret_aes256(master_key: &[u8; 32], stored: &str) -> Result<Stri
 }
 
 // ============================================================================
+
+/// Analyse une expression `rate_limit` comme `"60/min"`, `"10/sec"`, `"1000/hour"` -> `(max_calls, window_secs)`
+pub fn parse_rate_limit_spec(spec: &str) -> Option<(usize, u64)> {
+    let parts: Vec<&str> = spec.trim().split('/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let max_calls: usize = parts[0].trim().parse().ok()?;
+    if max_calls == 0 {
+        return None;
+    }
+    let window_secs = match parts[1].trim().to_lowercase().as_str() {
+        "s" | "sec" | "second" | "seconds" => 1,
+        "m" | "min" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86400,
+        _ => return None,
+    };
+    Some((max_calls, window_secs))
+}
+
+/// Remplace les paramètres nommés `:param` dans une URL HTTP par leur valeur dans `params`
+pub fn substitute_url_params(url_template: &str, params: &HashMap<String, Value>) -> String {
+    let mut result = url_template.to_string();
+    for (k, v) in params {
+        let placeholder = format!(":{}", k);
+        let replacement = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            _ => String::new(),
+        };
+        result = result.replace(&placeholder, &replacement);
+    }
+    result
+}
+
 // 2. MODÈLE DE DONNÉES ET PARSEUR .AIM (TOML)
 // ============================================================================
 
@@ -255,6 +292,19 @@ pub fn validate_proposed_aim_toml(aim_toml: &str) -> Result<AimToolFile, SelfHea
     })?;
 
     match parsed.handler.engine.as_str() {
+        "native_http" => {
+            let u = parsed.handler.url.as_deref().unwrap_or("").trim();
+            if u.is_empty() {
+                return Err(SelfHealingError {
+                    tool: parsed.tool.name.clone(),
+                    phase: "http_validation".into(),
+                    field: Some("handler.url".into()),
+                    expected_type: Some("non-empty URL string".into()),
+                    received_value: Value::Null,
+                    ai_fix_hint: "Engine 'native_http' requires a non-empty 'url' in [handler].".into(),
+                });
+            }
+        }
         "native_sql" => {
             let q = parsed.handler.query.as_deref().unwrap_or("").trim();
             if q.is_empty() {
@@ -350,6 +400,7 @@ pub struct AppState {
     pub admin_password_hash: Option<[u8; 32]>,
     pub tickets: RwLock<HashMap<String, ApprovalTicket>>,
     pub pending_waiters: Mutex<HashMap<String, oneshot::Sender<ApprovalTicket>>>,
+    pub rate_limiter: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl AppState {
@@ -376,6 +427,7 @@ impl AppState {
             admin_password_hash,
             tickets: RwLock::new(existing_tickets),
             pending_waiters: Mutex::new(HashMap::new()),
+            rate_limiter: Mutex::new(HashMap::new()),
         });
 
         state.reload_tools()?;
@@ -468,6 +520,12 @@ impl AppState {
                 let _ = conn.execute(
                     "INSERT INTO connections_vault (alias, kind, encrypted_secret, updated_at) VALUES (?1, ?2, ?3, ?4)",
                     params!["erp_postgres", "sqlite", enc, Utc::now().to_rfc3339()],
+                );
+            }
+            if let Ok(enc_http) = encrypt_secret_aes256(master_key, "sk_live_blind_credential_demo_token") {
+                let _ = conn.execute(
+                    "INSERT INTO connections_vault (alias, kind, encrypted_secret, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                    params!["external_billing_api", "http_bearer", enc_http, Utc::now().to_rfc3339()],
                 );
             }
         }
@@ -629,6 +687,31 @@ impl AppState {
                 )
             })?;
         decrypt_secret_aes256(&self.master_key, &enc)
+    }
+
+    /// Vérifie et applique le quota `rate_limit` (ex: `"60/min"`) d'un outil `.aim`
+    pub fn check_rate_limit(&self, tool_name: &str, rate_spec: Option<&str>) -> Result<(), u64> {
+        let spec_str = match rate_spec {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => return Ok(()),
+        };
+        let (max_calls, window_secs) = match parse_rate_limit_spec(spec_str) {
+            Some(pair) => pair,
+            None => return Ok(()),
+        };
+        let now = Instant::now();
+        let window = Duration::from_secs(window_secs);
+        let mut guard = self.rate_limiter.lock().unwrap();
+        let history = guard.entry(tool_name.to_string()).or_default();
+        history.retain(|t| now.duration_since(*t) < window);
+        if history.len() >= max_calls {
+            let oldest = history[0];
+            let elapsed = now.duration_since(oldest);
+            let retry_after = window.checked_sub(elapsed).map(|d| d.as_secs().max(1)).unwrap_or(1);
+            return Err(retry_after);
+        }
+        history.push(now);
+        Ok(())
     }
 
     pub fn verify_admin_password(&self, candidate: &str) -> bool {
@@ -1096,9 +1179,133 @@ fn rhai_map_to_json_hashmap(map: &RhaiMap) -> HashMap<String, Value> {
     out
 }
 
+
+/// Convertit une requête SQL à paramètres nommés `:param` en syntaxe PostgreSQL `$1, $2...`
+pub fn bind_postgres_named_sql(query: &str, params: &HashMap<String, Value>) -> (String, Vec<String>) {
+    let mut final_sql = String::new();
+    let mut ordered_vals = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == ':' && (i == 0 || chars[i - 1] != ':') {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            if j > i + 1 {
+                let param_name: String = chars[i + 1..j].iter().collect();
+                ordered_vals.push(
+                    params
+                        .get(&param_name)
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_default(),
+                );
+                final_sql.push_str(&format!("${}", ordered_vals.len()));
+                i = j;
+                continue;
+            }
+        }
+        final_sql.push(chars[i]);
+        i += 1;
+    }
+    (final_sql, ordered_vals)
+}
+
+/// Exécute une requête SQL sur PostgreSQL externe si l'URI du coffre-fort commence par `postgres://`
+fn execute_postgres_rows(
+    dsn: &str,
+    query: &str,
+    params: &HashMap<String, Value>,
+) -> Result<Vec<Value>, String> {
+    let mut client = postgres::Client::connect(dsn, postgres::NoTls).map_err(|e| e.to_string())?;
+    let (pg_sql, str_vals) = bind_postgres_named_sql(query, params);
+    let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> = str_vals
+        .iter()
+        .map(|s| s as &(dyn postgres::types::ToSql + Sync))
+        .collect();
+    let rows = client.query(&pg_sql, &param_refs[..]).map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+    for row in rows {
+        let mut map = serde_json::Map::new();
+        for (idx, col) in row.columns().iter().enumerate() {
+            let val: Value = if let Ok(v) = row.try_get::<_, i64>(idx) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<_, i32>(idx) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<_, f64>(idx) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<_, String>(idx) {
+                json!(v)
+            } else if let Ok(v) = row.try_get::<_, bool>(idx) {
+                json!(v)
+            } else {
+                Value::Null
+            };
+            map.insert(col.name().to_string(), val);
+        }
+        results.push(Value::Object(map));
+    }
+    Ok(results)
+}
+
+/// Exécute un appel HTTP sortant (`native_http` ou `env.http_request`) en injectant le secret Bearer du coffre-fort AES-256-GCM
+fn execute_blind_http_request(
+    bearer_secret: Option<&str>,
+    method: &str,
+    url: &str,
+    body: Option<&Value>,
+    timeout_ms: u64,
+) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.max(500)))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let req_method = match method.to_uppercase().as_str() {
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        "PATCH" => reqwest::Method::PATCH,
+        _ => reqwest::Method::GET,
+    };
+
+    let mut req = client
+        .request(req_method, url)
+        .header("User-Agent", "ModAIM-Rust/2.2");
+
+    if let Some(secret) = bearer_secret {
+        if !secret.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", secret));
+        }
+    }
+
+    if let Some(b) = body {
+        if !b.is_null() {
+            req = req.json(b);
+        }
+    }
+
+    let resp = req.send().map_err(|e| e.to_string())?;
+    let status_code = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    if let Ok(parsed_json) = serde_json::from_str::<Value>(&text) {
+        Ok(parsed_json)
+    } else {
+        Ok(json!({
+            "http_status": status_code,
+            "body": text
+        }))
+    }
+}
+
 #[derive(Clone)]
 struct SandboxEnv {
     db: Arc<Mutex<Connection>>,
+    master_key: [u8; 32],
 }
 
 /// Exécute un module WebAssembly (`engine = "wasm"`) dans une prison déterministe avec compteur d'instructions (`fuel`)
@@ -1237,15 +1444,27 @@ pub fn execute_tool_handler(
     match tool.handler.engine.as_str() {
         "native_sql" => {
             let query = tool.handler.query.as_deref().unwrap_or("");
-            let conn = state.db.lock().map_err(|e| SelfHealingError {
-                tool: tool.tool.name.clone(),
-                phase: "execution".into(),
-                field: None,
-                expected_type: None,
-                received_value: Value::Null,
-                ai_fix_hint: format!("Database lock error: {}", e),
-            })?;
-            let rows =
+            let conn_alias = tool.handler.connection.as_deref().unwrap_or("erp_postgres");
+            let secret_uri = state.resolve_vault_secret(conn_alias).unwrap_or_default();
+
+            let rows = if secret_uri.starts_with("postgres://") || secret_uri.starts_with("postgresql://") {
+                execute_postgres_rows(&secret_uri, query, clean_inputs).map_err(|e| SelfHealingError {
+                    tool: tool.tool.name.clone(),
+                    phase: "postgres_sql_execution".into(),
+                    field: None,
+                    expected_type: None,
+                    received_value: json!(query),
+                    ai_fix_hint: format!("PostgreSQL execution error: {}.", e),
+                })?
+            } else {
+                let conn = state.db.lock().map_err(|e| SelfHealingError {
+                    tool: tool.tool.name.clone(),
+                    phase: "execution".into(),
+                    field: None,
+                    expected_type: None,
+                    received_value: Value::Null,
+                    ai_fix_hint: format!("Database lock error: {}", e),
+                })?;
                 execute_sql_rows(&conn, query, clean_inputs).map_err(|e| SelfHealingError {
                     tool: tool.tool.name.clone(),
                     phase: "native_sql_execution".into(),
@@ -1256,8 +1475,38 @@ pub fn execute_tool_handler(
                         "SQL execution error: {}. Verify column names and syntax.",
                         e
                     ),
-                })?;
+                })?
+            };
             let out = Value::Array(rows);
+            validate_output_contract(tool, &out)?;
+            Ok((out, 1))
+        }
+        "native_http" => {
+            let url_tpl = tool.handler.url.as_deref().unwrap_or("");
+            let final_url = substitute_url_params(url_tpl, clean_inputs);
+            let method = tool.handler.method.as_deref().unwrap_or("GET");
+            let timeout_ms = tool.security.timeout_ms.unwrap_or(5000);
+            let bearer = tool
+                .handler
+                .connection
+                .as_deref()
+                .and_then(|alias| state.resolve_vault_secret(alias).ok());
+            let body_val = serde_json::to_value(clean_inputs).ok();
+            let out = execute_blind_http_request(
+                bearer.as_deref(),
+                method,
+                &final_url,
+                if method.eq_ignore_ascii_case("GET") { None } else { body_val.as_ref() },
+                timeout_ms,
+            )
+            .map_err(|e| SelfHealingError {
+                tool: tool.tool.name.clone(),
+                phase: "native_http_execution".into(),
+                field: Some("handler.url".into()),
+                expected_type: None,
+                received_value: json!(final_url),
+                ai_fix_hint: format!("HTTP request failed: {}. Verify the target URL and network connectivity.", e),
+            })?;
             validate_output_contract(tool, &out)?;
             Ok((out, 1))
         }
@@ -1318,6 +1567,40 @@ pub fn execute_tool_handler(
                         }
                         0
                     },
+                )
+                .register_fn(
+                    "http_request",
+                    |env: &mut SandboxEnv,
+                     conn_alias: &str,
+                     method: &str,
+                     url: &str,
+                     body: RhaiMap|
+                     -> Dynamic {
+                        let bearer = if let Ok(conn) = env.db.lock() {
+                            conn.query_row(
+                                "SELECT encrypted_secret FROM connections_vault WHERE alias = ?1",
+                                params![conn_alias],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .ok()
+                            .and_then(|enc| decrypt_secret_aes256(&env.master_key, &enc).ok())
+                        } else {
+                            None
+                        };
+                        let body_json = Value::Object(
+                            rhai_map_to_json_hashmap(&body).into_iter().collect(),
+                        );
+                        match execute_blind_http_request(
+                            bearer.as_deref(),
+                            method,
+                            url,
+                            Some(&body_json),
+                            5000,
+                        ) {
+                            Ok(val) => json_to_rhai_dynamic(&val),
+                            Err(err) => json_to_rhai_dynamic(&json!({ "error": err })),
+                        }
+                    },
                 );
 
             let mut scope = Scope::new();
@@ -1325,6 +1608,7 @@ pub fn execute_tool_handler(
                 "env",
                 SandboxEnv {
                     db: Arc::clone(&state.db),
+                    master_key: state.master_key,
                 },
             );
 
@@ -1666,6 +1950,30 @@ async fn mcp_handler_inner(
                         }
                     }));
                 }
+            }
+
+            if let Err(retry_after_sec) =
+                state.check_rate_limit(&tool.tool.name, tool.security.rate_limit.as_deref())
+            {
+                return Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32005,
+                        "message": "AIM_RATE_LIMIT_EXCEEDED",
+                        "data": {
+                            "tool": tool.tool.name,
+                            "rate_limit": tool.security.rate_limit,
+                            "retry_after_sec": retry_after_sec,
+                            "ai_fix_hint": format!(
+                                "Rate limit ({}) exceeded for tool '{}'. Wait {} second(s) before retrying.",
+                                tool.security.rate_limit.as_deref().unwrap_or(""),
+                                tool.tool.name,
+                                retry_after_sec
+                            )
+                        }
+                    }
+                }));
             }
 
             let clean_inputs = match validate_and_prepare_inputs(&tool, &args) {
@@ -2619,5 +2927,47 @@ script = "return #{ discounted: input.amount * 0.9 };"
         assert!(state
             .verify_agent_api_key_scope(Some(raw_key), "billing:write")
             .is_err());
+    }
+
+    #[test]
+    fn test_rate_limiter_sliding_window_enforcement() {
+        let state = setup_test_state();
+        assert_eq!(parse_rate_limit_spec("60/min"), Some((60, 60)));
+        assert_eq!(parse_rate_limit_spec("2/sec"), Some((2, 1)));
+
+        // 2 appels autorisés par minute
+        assert!(state.check_rate_limit("limited_tool", Some("2/min")).is_ok());
+        assert!(state.check_rate_limit("limited_tool", Some("2/min")).is_ok());
+        // Le 3e appel dans la même fenêtre est bloqué et renvoie retry_after >= 1s
+        let err_retry = state.check_rate_limit("limited_tool", Some("2/min")).unwrap_err();
+        assert!(err_retry >= 1);
+    }
+
+    #[test]
+    fn test_native_http_url_substitution_and_validation() {
+        let mut params = HashMap::new();
+        params.insert("resource_id".into(), json!("inv_9988"));
+        let final_url = substitute_url_params("https://api.example.com/v1/items/:resource_id", &params);
+        assert_eq!(final_url, "https://api.example.com/v1/items/inv_9988");
+
+        let state = setup_test_state();
+        let tools = state.tools.read().unwrap();
+        assert!(tools.contains_key("check_external_status_http"));
+    }
+
+    #[test]
+    fn test_postgres_named_sql_parameter_conversion() {
+        let mut params = HashMap::new();
+        params.insert("client_id".into(), json!(42));
+        params.insert("status".into(), json!("unpaid"));
+        let (pg_sql, vals) = bind_postgres_named_sql(
+            "SELECT id FROM invoices WHERE client_id = :client_id AND status = :status",
+            &params,
+        );
+        assert_eq!(
+            pg_sql,
+            "SELECT id FROM invoices WHERE client_id = $1 AND status = $2"
+        );
+        assert_eq!(vals, vec!["42".to_string(), "unpaid".to_string()]);
     }
 }

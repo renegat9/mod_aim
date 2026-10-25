@@ -1,0 +1,23 @@
+[tool]
+name = "check_external_status_http"
+description = "Interroge une API REST externe en injectant automatiquement le jeton Bearer déchiffré depuis le coffre-fort AES-256-GCM (engine = native_http)."
+version = "1.0.0"
+exposure = ["mcp", "rest"]
+
+[security]
+auth_scope = "billing:read"
+require_human_approval = false
+rate_limit = "30/min"
+timeout_ms = 5000
+
+[input]
+resource_id = { type = "string", min_len = 1, description = "Identifiant de la ressource distante" }
+
+[output]
+status = "string"
+
+[handler]
+engine = "native_http"
+connection = "external_billing_api"
+method = "GET"
+url = "https://httpbin.org/anything/:resource_id"

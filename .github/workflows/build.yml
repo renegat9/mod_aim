@@ -1,4 +1,4 @@
-name: Unpack ZIP & Build mod_aim (Rust)
+name: Build, Release & Publish Docker (mod_aim Rust)
 
 on:
   push:
@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,7 +76,7 @@ jobs:
           cp deploy/config.example.toml dist/aim-engine-linux-x86_64/deploy/ || true
           cp deploy/apache/* dist/aim-engine-linux-x86_64/deploy/apache/ || true
           cp deploy/systemd/* dist/aim-engine-linux-x86_64/deploy/systemd/ || true
-          cp README.md README_FR.md Dockerfile docker-compose.yml dist/aim-engine-linux-x86_64/ || true
+          cp README.md README.fr.md LICENSE Dockerfile docker-compose.yml dist/aim-engine-linux-x86_64/ || true
           cd dist && tar -czvf aim-engine-linux-x86_64.tar.gz aim-engine-linux-x86_64
 
       - name: Upload Compiled Binary Artifact (Linux)
@@ -110,3 +111,66 @@ jobs:
         with:
           name: aim-engine-windows-x86_64
           path: target/release/aim-daemon.exe
+
+  publish-docker-ghcr:
+    name: Publish Docker Image (ghcr.io)
+    needs: unpack-and-build-linux
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Log in to GitHub Container Registry (ghcr.io)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image to ghcr.io
+        run: |
+          IMAGE_NAME="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          docker build -t "$IMAGE_NAME:latest" -t "$IMAGE_NAME:v2.2.0" .
+          docker push "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:v2.2.0"
+
+  publish-github-release:
+    name: Publish GitHub Release (Linux & Windows Binaries)
+    needs: [unpack-and-build-linux, build-windows]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: aim-engine-linux-x86_64
+          path: release_assets/linux
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: aim-engine-windows-x86_64
+          path: release_assets/windows
+
+      - name: Create or Update GitHub Release v2.2.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v2.2.0"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              release_assets/linux/dist/aim-engine-linux-x86_64.tar.gz \
+              release_assets/windows/aim-daemon.exe \
+              --clobber
+          else
+            gh release create "$TAG" \
+              release_assets/linux/dist/aim-engine-linux-x86_64.tar.gz \
+              release_assets/windows/aim-daemon.exe \
+              --title "mod_aim v2.2.0 — Standalone Zero-Trust Rust Engine" \
+              --notes "Binaires pré-compilés Linux (x86_64) et Windows (x86_64) + Image Docker officielle sur \`ghcr.io/${{ github.repository }}:latest\`."
+          fi

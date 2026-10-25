@@ -14,7 +14,7 @@
 2. **Séparation Physique des Ports Réseau (Dual-Port Zero-Trust)** :
    - **Port Public (`8080` — Data Plane Agents)** : Expose uniquement `/mcp`, `/api/v1/:tool_name` et `/llms.txt`, protégés par clés API (`Authorization: Bearer aim_live_...`) et contrôle strict du `auth_scope` par outil. Aucune route d'administration n'existe sur ce port.
    - **Port d'Administration (`8081` — Control Plane Humain)** : Expose uniquement l'interface `/_admin` et ses API de gouvernance, protégées par mot de passe administrateur (`AIM_ADMIN_PASSWORD`, vérifié par hachage `SHA-256` en temps constant).
-3. **3 Moteurs d'Exécution Embarqués** :
+3. **4 Moteurs d'Exécution Embarqués (`native_sql` SQLite/PostgreSQL, `native_http`, `rhai`, `wasm`)** :
    - `native_sql` : Requêtes SQL préparées à paramètres nommés (`:param`) sans aucun code interprété.
    - `rhai` : Scripts métier sandboxés en mémoire sans aucune primitive système (`exec`, fichiers ou sockets bruts n'existent pas), bornés par `max_cpu_instructions` et `max_memory_kb`.
    - `wasm` : Exécution de modules WebAssembly isolés avec compteur d'instructions matériel (`consume_fuel`).
@@ -32,11 +32,11 @@
 ```text
 ├── .github/workflows/build.yml           # Pipeline CI/CD GitHub Actions (Tests + Binaires Linux & Windows)
 ├── .devcontainer/devcontainer.json       # Configuration GitHub Codespaces (Ports 8080 & 8081)
-├── Cargo.toml                            # Manifeste Rust et dépendances (v2.1.0)
+├── Cargo.toml                            # Manifeste Rust et dépendances (v2.2.0)
 ├── Dockerfile                            # Image Docker multi-stage Zero-Trust (utilisateur non-root aim-runner)
 ├── docker-compose.yml                    # Stack Docker Compose (Port 8080 public + Port 8081 local + volumes)
 ├── src/
-│   ├── main.rs                           # Cœur du moteur mod_aim + 13 tests unitaires et contractuels
+│   ├── main.rs                           # Cœur du moteur mod_aim + 16 tests unitaires et contractuels
 │   └── admin_ui.html                     # Interface Web SPA du Control Plane Humain (embarquée dans le binaire)
 ├── tools/                                # Catalogue d'outils .aim surveillé en temps réel (Hot-Reload)
 │   ├── search_invoices.aim               # [native_sql] Recherche déclarative de factures par statut
