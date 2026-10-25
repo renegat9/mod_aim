@@ -75,7 +75,64 @@ docker compose up -d
 * **AI Agent Data Plane (`8080`)**: `http://127.0.0.1:8080/mcp` and `http://127.0.0.1:8080/llms.txt`
 * **Human Control Plane (`8081`)**: `http://127.0.0.1:8081/_admin`
 
-### Option 2: Download Pre-Compiled Binaries (GitHub Releases)
+### Option 2: Integrate `mod_aim` into an Existing Stack or Image (e.g., `php:8.5-apache`)
+
+#### 2A. Sidecar Pattern in `docker-compose.yml` (Zero custom Dockerfile)
+Attach `aim-daemon` alongside your existing `php:8.5-apache` container so Apache proxies `/mcp`, `/api/v1/`, and `/llms.txt` directly to `mod_aim` while sharing the `./tools` directory:
+
+```yaml
+services:
+  php-app:
+    image: php:8.5-apache
+    ports:
+      - "80:80"
+    volumes:
+      - ./public:/var/www/html
+      - ./tools:/var/www/aim-tools
+    command: >
+      bash -c "a2enmod proxy proxy_http headers &&
+      echo 'ProxyPass /mcp http://aim-daemon:8080/mcp' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPassReverse /mcp http://aim-daemon:8080/mcp' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPass /api/v1/ http://aim-daemon:8080/api/v1/' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPassReverse /api/v1/ http://aim-daemon:8080/api/v1/' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPass /llms.txt http://aim-daemon:8080/llms.txt' >> /etc/apache2/apache2.conf &&
+      apache2-foreground"
+    depends_on:
+      - aim-daemon
+
+  aim-daemon:
+    image: ghcr.io/renegat9/mod_aim:latest
+    ports:
+      - "127.0.0.1:8081:8081" # Human Control Plane /_admin (localhost only)
+    environment:
+      AIM_TOOLS_DIR: "/app/tools"
+      AIM_DB_PATH: "/data/engine.sqlite"
+      AIM_MASTER_KEY: "${AIM_MASTER_KEY:-replace_with_a_32_byte_minimum_aes256_secret}"
+      AIM_ADMIN_PASSWORD: "${AIM_ADMIN_PASSWORD:-replace_with_a_strong_admin_password}"
+    volumes:
+      - ./tools:/app/tools
+      - aim_sqlite_data:/data
+
+volumes:
+  aim_sqlite_data:
+```
+
+#### 2B. Single-Container Injection (`COPY --from` inside an existing `php:8.5-apache` Dockerfile)
+Because `aim-daemon` is a self-contained binary, you can inject it into any Debian/Ubuntu-based image (`php:8.5-apache`, `php:8.5-fpm`, `node`, etc.) in a single line:
+
+```dockerfile
+FROM ghcr.io/renegat9/mod_aim:latest AS mod_aim_bin
+
+FROM php:8.5-apache
+COPY --from=mod_aim_bin /usr/local/bin/aim-daemon /usr/local/bin/aim-daemon
+
+RUN a2enmod proxy proxy_http headers \
+    && printf "\nProxyPass /mcp http://127.0.0.1:8080/mcp\nProxyPassReverse /mcp http://127.0.0.1:8080/mcp\nProxyPass /api/v1/ http://127.0.0.1:8080/api/v1/\nProxyPassReverse /api/v1/ http://127.0.0.1:8080/api/v1/\n" >> /etc/apache2/apache2.conf
+
+CMD ["sh", "-c", "/usr/local/bin/aim-daemon & exec apache2-foreground"]
+```
+
+### Option 3: Download Pre-Compiled Binaries (GitHub Releases)
 
 1. Go to the **[Releases](https://github.com/renegat9/mod_aim/releases/latest)** page on GitHub.
 2. Download the archive for your platform:
@@ -83,7 +140,7 @@ docker compose up -d
    - **Windows (`x86_64`)**: `aim-daemon.exe`.
 3. Extract and launch `./aim-daemon` (Linux) or `aim-daemon.exe` (Windows).
 
-### Option 3: Build from Source
+### Option 4: Build from Source
 ```bash
 cargo test
 cargo run --release

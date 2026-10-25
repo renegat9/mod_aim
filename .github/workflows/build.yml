@@ -72,7 +72,7 @@ jobs:
           cp target/release/aim-daemon dist/aim-engine-linux-x86_64/
           cp tools/*.aim dist/aim-engine-linux-x86_64/tools/
           cp docs/*.md dist/aim-engine-linux-x86_64/docs/ || true
-          cp examples/* dist/aim-engine-linux-x86_64/examples/ || true
+          cp -r examples/* dist/aim-engine-linux-x86_64/examples/ || true
           cp deploy/config.example.toml dist/aim-engine-linux-x86_64/deploy/ || true
           cp deploy/apache/* dist/aim-engine-linux-x86_64/deploy/apache/ || true
           cp deploy/systemd/* dist/aim-engine-linux-x86_64/deploy/systemd/ || true

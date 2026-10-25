@@ -32,3 +32,10 @@ docker compose up -d --build
 
 * **Endpoints Agents IA** : `http://localhost:8080/mcp` et `http://localhost:8080/llms.txt`
 * **Console d'Administration Humaine** : `http://127.0.0.1:8081/_admin` (demande le mot de passe `AIM_ADMIN_PASSWORD` à l'ouverture).
+
+
+---
+
+## 3. Intégration dans une image existante (`php:8.5-apache`)
+
+Consultez les modèles prêts à l'emploi dans [`examples/docker-php-integration/`](../examples/docker-php-integration/) (`docker-compose.yml` en mode Sidecar et `Dockerfile.php85-embedded` en mode conteneur unique via `COPY --from=ghcr.io/renegat9/mod_aim:latest`).

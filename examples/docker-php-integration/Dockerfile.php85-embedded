@@ -1,0 +1,18 @@
+# ==============================================================================
+# Alternative : Injecter directement le binaire `aim-daemon` DANS une image php:8.5-apache
+# ==============================================================================
+FROM ghcr.io/renegat9/mod_aim:latest AS mod_aim_bin
+
+FROM php:8.5-apache
+
+# 1. Copier uniquement le binaire compilé Rust (aucune dépendance Rust requise)
+COPY --from=mod_aim_bin /usr/local/bin/aim-daemon /usr/local/bin/aim-daemon
+
+# 2. Activer le reverse-proxy Apache vers le démon local (127.0.0.1:8080)
+RUN a2enmod proxy proxy_http headers rewrite \
+    && mkdir -p /var/www/aim-tools /var/lib/aim-engine \
+    && chown -R www-data:www-data /var/www/aim-tools /var/lib/aim-engine \
+    && printf "\nProxyPass /mcp http://127.0.0.1:8080/mcp\nProxyPassReverse /mcp http://127.0.0.1:8080/mcp\nProxyPass /api/v1/ http://127.0.0.1:8080/api/v1/\nProxyPassReverse /api/v1/ http://127.0.0.1:8080/api/v1/\nProxyPass /llms.txt http://127.0.0.1:8080/llms.txt\nProxyPassReverse /llms.txt http://127.0.0.1:8080/llms.txt\n" >> /etc/apache2/apache2.conf
+
+# 3. Démarrer aim-daemon en tâche de fond puis Apache au premier plan
+CMD ["sh", "-c", "/usr/local/bin/aim-daemon & exec apache2-foreground"]

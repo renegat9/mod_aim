@@ -1,0 +1,57 @@
+# ==============================================================================
+# Exemple d'intégration de mod_aim avec une application existante (php:8.5-apache)
+# ==============================================================================
+# Ce fichier illustre l'architecture recommandée sous Docker :
+# - Le conteneur `php-app` (php:8.5-apache) sert votre site PHP existant ET
+#   relaie automatiquement `/mcp`, `/api/v1/` et `/llms.txt` vers `aim-daemon`.
+# - Le dossier `./tools` est partagé : votre back-office PHP ou vos développeurs
+#   peuvent déposer des fichiers `.aim` qui sont activés à chaud par `aim-daemon`.
+# ==============================================================================
+
+services:
+  php-app:
+    image: php:8.5-apache
+    container_name: my_php85_app
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./public:/var/www/html
+      - ./tools:/var/www/aim-tools
+    command: >
+      bash -c "a2enmod proxy proxy_http headers rewrite &&
+      echo 'ProxyPass /mcp http://aim-daemon:8080/mcp' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPassReverse /mcp http://aim-daemon:8080/mcp' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPass /api/v1/ http://aim-daemon:8080/api/v1/' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPassReverse /api/v1/ http://aim-daemon:8080/api/v1/' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPass /llms.txt http://aim-daemon:8080/llms.txt' >> /etc/apache2/apache2.conf &&
+      echo 'ProxyPassReverse /llms.txt http://aim-daemon:8080/llms.txt' >> /etc/apache2/apache2.conf &&
+      apache2-foreground"
+    depends_on:
+      - aim-daemon
+
+  aim-daemon:
+    image: ghcr.io/renegat9/mod_aim:latest
+    container_name: mod_aim_sidecar
+    restart: unless-stopped
+    ports:
+      # Console d'administration humaine accessible uniquement en local sur l'hôte
+      - "127.0.0.1:8081:8081"
+    environment:
+      AIM_BIND_ADDR: "0.0.0.0:8080"
+      AIM_ADMIN_BIND_ADDR: "0.0.0.0:8081"
+      AIM_TOOLS_DIR: "/app/tools"
+      AIM_DB_PATH: "/data/engine.sqlite"
+      AIM_MASTER_KEY: "${AIM_MASTER_KEY:-remplacez_par_une_cle_maitre_aes256_de_32_octets}"
+      AIM_ADMIN_PASSWORD: "${AIM_ADMIN_PASSWORD:-remplacez_par_un_mot_de_passe_admin_fort}"
+      RUST_LOG: "info"
+    volumes:
+      - ./tools:/app/tools
+      - aim_sqlite_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  aim_sqlite_data:

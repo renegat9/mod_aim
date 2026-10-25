@@ -19,3 +19,10 @@ docker run -d \
   -v aim_sqlite_data:/data \
   ghcr.io/renegat9/mod_aim:latest
 ```
+
+
+---
+
+## 3. Integrating into an Existing Image (`php:8.5-apache`)
+
+See the ready-to-use templates in [`examples/docker-php-integration/`](../examples/docker-php-integration/) (`docker-compose.yml` for Sidecar mode and `Dockerfile.php85-embedded` for single-container `COPY --from=ghcr.io/renegat9/mod_aim:latest` injection).
