@@ -435,7 +435,7 @@
       document.getElementById('count-proposals').textContent = pendingProps;
       const el = document.getElementById('proposals-container');
       if (!proposals.length) {
-        el.innerHTML = '<p class="muted">Aucune proposition d'outil IA en attente.</p>';
+        el.innerHTML = "<p class='muted'>Aucune proposition d'outil IA en attente.</p>";
         return;
       }
       el.innerHTML = proposals.map(p => `
